@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -13,8 +14,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-import config
-from analyzer import TechnicalProfile
+from runtime import config
+from analysis.analyzer import TechnicalProfile
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _normalize_provenance(meta: dict | None) -> dict:
     if expires_at is not None:
         stale = expires_at < now
 
-    return {
+    normalized = {
         "source": item.get("source", ""),
         "symbol": item.get("symbol", ""),
         "data_type": item.get("data_type", ""),
@@ -88,6 +89,22 @@ def _normalize_provenance(meta: dict | None) -> dict:
         "ttl_seconds": ttl_seconds,
         "stale": stale,
     }
+    for key, value in item.items():
+        if key not in normalized:
+            normalized[key] = value
+    return normalized
+
+
+def _article_fingerprint(article: dict) -> str:
+    base = "|".join(
+        [
+            str((article or {}).get("url", "")).strip(),
+            str((article or {}).get("headline", "")).strip(),
+            str((article or {}).get("datetime", "")).strip(),
+            str((article or {}).get("source", "")).strip(),
+        ]
+    )
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 def _extract_numeric_series(df: pd.DataFrame | None, column: str) -> pd.Series:
@@ -717,6 +734,7 @@ class FeatureAssembler:
         premarket_data: dict | None,
         news_data: dict | None,
         news_sentiment_data: dict | None,
+        news_semantic_data: dict | None,
         news_articles: list[dict] | None,
         ticker_info: dict | None,
         options_summary: dict | None = None,
@@ -802,19 +820,27 @@ class FeatureAssembler:
         # 新闻块
         raw_articles = news_articles or []
         max_news = int(config.FEATURES["max_news_articles_per_stock"])
+        semantic_map = {}
+        semantic_rollup = {}
+        if isinstance(news_semantic_data, dict):
+            semantic_map = dict(news_semantic_data.get("by_fingerprint") or {})
+            semantic_rollup = dict(news_semantic_data.get("rollup") or {})
         compact_articles = []
         for article in raw_articles[:max_news]:
-            compact_articles.append(
-                {
-                    "datetime": _safe_int(article.get("datetime")),
-                    "headline": article.get("headline", ""),
-                    "summary": article.get("summary", ""),
-                    "source": article.get("source", ""),
-                    "url": article.get("url", ""),
-                    "related": article.get("related", ""),
-                    "image": article.get("image", ""),
-                }
-            )
+            compact = {
+                "datetime": _safe_int(article.get("datetime")),
+                "headline": article.get("headline", ""),
+                "summary": article.get("summary", ""),
+                "source": article.get("source", ""),
+                "url": article.get("url", ""),
+                "related": article.get("related", ""),
+                "image": article.get("image", ""),
+            }
+            fingerprint = _article_fingerprint(article)
+            semantic = semantic_map.get(fingerprint)
+            if isinstance(semantic, dict) and semantic:
+                compact["semantic"] = dict(semantic)
+            compact_articles.append(compact)
 
         result.news = {
             "sentiment_score": (news_data or {}).get("score", 50),
@@ -824,6 +850,7 @@ class FeatureAssembler:
             "bearish_keyword_hits": (news_data or {}).get("bearish_count", 0),
             "top_headline": (news_data or {}).get("top_headline", ""),
             "provider_sentiment_raw": dict(news_sentiment_data or {}),
+            "semantic_rollup": semantic_rollup,
             "recent_articles": compact_articles,
         }
 
@@ -946,6 +973,7 @@ class FeatureAssembler:
             "sector_context": _normalize_provenance(source_meta.get("sector_context")),
             "upcoming_events": _normalize_provenance(source_meta.get("upcoming_events")),
             "news_provider_sentiment": _normalize_provenance(source_meta.get("news_sentiment")),
+            "news_semantic": _normalize_provenance(source_meta.get("news_semantic")),
         }
         result.source_meta = {
             "generated_at": datetime.utcnow().isoformat(),

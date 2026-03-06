@@ -11,9 +11,9 @@ import pandas as pd
 try:
     import pandas_ta as ta
 except ImportError:
-    import pandas_ta_compat as ta
+    from analysis import pandas_ta_compat as ta
 
-import config
+from runtime import config
 
 logger = logging.getLogger(__name__)
 

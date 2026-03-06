@@ -5,7 +5,9 @@ yfinance>=0.2.36
 requests>=2.31.0
 
 # 技术分析
-pandas-ta>=0.3.14b1
+# `analyzer.py` 会优先尝试 pandas-ta；若不可用，则回退到本地 pandas_ta_compat.py。
+# 当前项目验证环境使用 `ta` 作为兼容实现依赖。
+ta>=0.11.0
 
 # 数据处理
 pandas>=2.0.0

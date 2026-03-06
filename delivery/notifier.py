@@ -7,13 +7,22 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
-import config
-from scorer import StockFeatures
+from runtime import config
+from analysis.scorer import StockFeatures
 
 logger = logging.getLogger(__name__)
+
+
+def _market_now() -> datetime:
+    """统一使用美东时间展示时间戳"""
+    try:
+        return datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return datetime.utcnow()
 
 
 def _fmt_cap(v: float | None) -> str:
@@ -73,7 +82,7 @@ class DiscordNotifier:
             self._send_empty_report()
             return
 
-        now = datetime.now()
+        now = _market_now()
         date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M ET")
 
@@ -243,7 +252,7 @@ class DiscordNotifier:
 
     def _send_empty_report(self):
         embed = {
-            "title": f"🧩 美股特征候选池 — {datetime.now().strftime('%Y-%m-%d')}",
+            "title": f"🧩 美股特征候选池 — {_market_now().strftime('%Y-%m-%d')}",
             "description": (
                 "⚠️ **今日无候选股票通过基础过滤**\n\n"
                 "可能原因:\n"
@@ -261,7 +270,7 @@ class DiscordNotifier:
                     "title": "✅ 测试消息",
                     "description": "Discord Webhook 连接成功! 特征聚合系统已就绪。",
                     "color": self.colors["embed_color_bullish"],
-                    "footer": {"text": f"测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"},
+                    "footer": {"text": f"测试时间: {_market_now().strftime('%Y-%m-%d %H:%M:%S ET')}"},
                 }
             ]
         }
@@ -278,7 +287,7 @@ def format_console_report(stocks: list[StockFeatures], market_summary: dict | No
     生成控制台文本报告 (同时用于保存到文件)
     """
     lines = []
-    now = datetime.now()
+    now = _market_now()
 
     lines.append("=" * 72)
     lines.append(f"  美股特征候选池 — {now.strftime('%Y-%m-%d %H:%M ET')}")

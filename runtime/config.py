@@ -4,15 +4,37 @@
 """
 
 import os
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv():
+        return False
 
 load_dotenv()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 # ============================================================
 # API Keys
 # ============================================================
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
 
 # ============================================================
 # 股票池初始筛选条件
@@ -110,6 +132,14 @@ NEWS = {
     "finnhub_rate_limit": 55,       # Finnhub 免费版每分钟请求数上限
     "market_news_categories": ["general", "forex", "merger"],  # 市场新闻类别
     "enable_provider_sentiment": True,
+    "enable_semantic_tagging": _env_bool("ENABLE_SEMANTIC_TAGGING", True),
+    "semantic_provider": "minimax",
+    "semantic_model": "MiniMax-M2.5",
+    "semantic_prompt_version": "news_semantic_v1",
+    "semantic_endpoint": "https://api.minimaxi.com/v1/chat/completions",
+    "semantic_timeout_seconds": 20,
+    "semantic_max_articles_per_stock": _env_int("SEMANTIC_MAX_ARTICLES_PER_STOCK", 20),
+    "semantic_enable_fallback": True,
 }
 
 # ============================================================
@@ -174,6 +204,7 @@ CACHE = {
     "company_news_ttl_minutes": 20,  # 个股新闻缓存
     "market_news_ttl_minutes": 30,   # 市场新闻缓存
     "news_sentiment_ttl_minutes": 60,
+    "news_semantic_ttl_hours": 72,
     "options_ttl_minutes": 30,
     "economic_calendar_ttl_minutes": 60,
     "history_incremental_lookback_days": 7,  # 增量补拉回看窗口
@@ -186,6 +217,94 @@ LLM = {
     "inputs_root_dir": "output/llm_inputs",
     "analysis_horizon": "1-2w",
     "model_profiles": ["tech", "news", "fund", "judge"],  # 每只股票可并行分析的角色
+}
+
+# ============================================================
+# Symbol Registry / Session / Pipeline vNext
+# ============================================================
+SYMBOL_REGISTRY = {
+    "master_file": "data/symbol_registry.json",
+    "seed_from_fallback_on_missing": True,
+}
+
+SESSION_CONFIG = {
+    "market_timezone": "America/New_York",
+    "market_open_time": "09:30",
+    "market_close_time": "16:00",
+    "pre_market_label": "pre_market",
+    "intraday_label": "intraday",
+    "post_close_label": "post_close",
+}
+
+DATA_CONFIG = {
+    "history_lookback_days": TECHNICAL["lookback_days"],
+    "news_lookback_hours": NEWS["lookback_hours"],
+    "max_company_news_per_symbol": NEWS["max_articles_per_stock"],
+    "market_news_categories": list(NEWS["market_news_categories"]),
+    "economic_calendar_days_ahead": EVENTS["future_days"],
+}
+
+BUDGET_CONFIG = {
+    "max_symbols_for_news": 150,
+    "max_symbols_for_triage": 80,
+    "max_symbols_for_deep_analysis": 20,
+    "final_selection_count": 10,
+    "enable_live_llm": bool(MINIMAX_API_KEY),
+    "llm_timeout_seconds": _env_int("LLM_TIMEOUT_SECONDS", 25),
+}
+
+PIPELINE_CONFIG = {
+    "enabled_stages": {
+        "market_context": True,
+        "candidate_generators": True,
+        "compact_triage": True,
+        "deep_analysis": True,
+        "cross_stock_judge": True,
+        "outcome_store": True,
+    },
+    "schema_versions": {
+        "run_manifest": "v1.run_manifest",
+        "session_context": "v1.session_context",
+        "compact_card": "v1.compact_card",
+        "full_dossier": "v1.full_dossier",
+        "trace": "v1.symbol_trace",
+        "triage": "triage_v1",
+        "deep_analysis": "deep_analysis_v1",
+        "portfolio_judge": "portfolio_judge_v1",
+        "candidate_set": "v1.candidate_set",
+        "outcome_store": "v1.outcome_store",
+    },
+    "artifact_root_dir": "output/runs",
+    "llm": {
+        "provider": "minimax",
+        "model": NEWS["semantic_model"],
+        "endpoint": NEWS["semantic_endpoint"],
+        "triage_prompt_version": "triage_v1",
+        "deep_analysis_prompt_version": "deep_analysis_v1",
+        "portfolio_judge_prompt_version": "portfolio_judge_v1",
+    },
+    "candidate_generators": {
+        "premarket_dislocation": {
+            "strong_gap_pct": PREMARKET["gap_strong_threshold"],
+            "moderate_gap_pct": PREMARKET["gap_moderate_threshold"],
+        },
+        "news_attention": {
+            "min_articles": 2,
+            "high_impact_weighted_score": 20.0,
+        },
+        "event": {
+            "near_term_days": 14,
+        },
+        "price_action": {
+            "min_volume_ratio": TECHNICAL["volume_surge_threshold"],
+            "min_relative_strength_pct": 5.0,
+            "breakout_bonus": 1.0,
+        },
+        "sector_rotation": {
+            "min_relative_strength_pct": 4.0,
+            "min_peer_count": 2,
+        },
+    },
 }
 
 # ============================================================

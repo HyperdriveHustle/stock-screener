@@ -17,8 +17,8 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-import config
-from cache_store import SQLiteCache
+from runtime import config
+from providers.cache_store import SQLiteCache
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,21 @@ class MarketDataCollector:
         """
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        else:
+            columns = [str(col) for col in df.columns]
+            required = {"Open", "High", "Low", "Close", "Volume"}
+            if not required.issubset(set(columns)) and len(columns) >= 5:
+                # 某些单 ticker 缓存回读后会退化成:
+                # NVDA / NVDA.1 / NVDA.2 / NVDA.3 / NVDA.4
+                # 其顺序实际仍然是 Open/High/Low/Close/Volume.
+                suffix_pattern = all(
+                    idx == 0 or columns[idx].startswith(f"{columns[0]}.")
+                    for idx in range(min(5, len(columns)))
+                )
+                if suffix_pattern:
+                    renamed = columns[:]
+                    renamed[:5] = ["Open", "High", "Low", "Close", "Volume"]
+                    df.columns = renamed
         df = df.dropna(how="all")
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
@@ -463,12 +478,16 @@ class NewsCollector:
         self.cache_stats = {
             "company_news_hit": 0,
             "company_news_miss": 0,
+            "company_news_disabled": 0,
             "market_news_hit": 0,
             "market_news_miss": 0,
+            "market_news_disabled": 0,
             "news_sentiment_hit": 0,
             "news_sentiment_miss": 0,
+            "news_sentiment_disabled": 0,
             "economic_calendar_hit": 0,
             "economic_calendar_miss": 0,
+            "economic_calendar_disabled": 0,
         }
         self.company_news_meta: dict[str, dict] = {}
         self.market_news_meta: dict[str, dict] = {}
@@ -490,6 +509,20 @@ class NewsCollector:
     @staticmethod
     def _economic_calendar_cache_key(from_date: str, to_date: str) -> str:
         return f"economic_calendar:{from_date}:{to_date}"
+
+    @staticmethod
+    def _build_disabled_meta(symbol: str, data_type: str, reason: str) -> dict:
+        now_iso = _ensure_utc_timestamp(datetime.utcnow())
+        return {
+            "source": "finnhub",
+            "symbol": symbol,
+            "data_type": data_type,
+            "as_of": now_iso,
+            "fetched_at": now_iso,
+            "expires_at": "",
+            "retrieval_mode": "cache_miss",
+            "disabled_reason": reason,
+        }
 
     def _rate_limit_wait(self):
         """简单的速率限制"""
@@ -605,6 +638,14 @@ class NewsCollector:
         """
         if not self.api_key:
             logger.warning("未配置 FINNHUB_API_KEY, 跳过新闻采集")
+            self.company_news_meta = {}
+            for ticker in tickers:
+                self.company_news_meta[ticker] = self._build_disabled_meta(
+                    symbol=ticker,
+                    data_type="company_news",
+                    reason="missing_api_key",
+                )
+            self.cache_stats["company_news_disabled"] += len(tickers)
             return {}
 
         results = {}
@@ -633,6 +674,15 @@ class NewsCollector:
         Args:
             category: general, forex, crypto, merger
         """
+        if not self.api_key:
+            self.market_news_meta[category] = self._build_disabled_meta(
+                symbol="MARKET",
+                data_type=f"market_news:{category}",
+                reason="missing_api_key",
+            )
+            self.cache_stats["market_news_disabled"] += 1
+            return []
+
         cache_key = self._market_news_cache_key(category)
         cache_meta = self.cache.get_meta(cache_key)
         cached = self.cache.get(cache_key)
@@ -699,7 +749,22 @@ class NewsCollector:
         """
         获取 Finnhub 新闻情绪原始结果
         """
-        if not self.api_key or not config.NEWS.get("enable_provider_sentiment", True):
+        if not self.api_key:
+            self.news_sentiment_meta[ticker] = self._build_disabled_meta(
+                symbol=ticker,
+                data_type="news_sentiment",
+                reason="missing_api_key",
+            )
+            self.cache_stats["news_sentiment_disabled"] += 1
+            return {}
+
+        if not config.NEWS.get("enable_provider_sentiment", True):
+            self.news_sentiment_meta[ticker] = self._build_disabled_meta(
+                symbol=ticker,
+                data_type="news_sentiment",
+                reason="feature_disabled",
+            )
+            self.cache_stats["news_sentiment_disabled"] += 1
             return {}
 
         cache_key = self._news_sentiment_cache_key(ticker)
@@ -759,6 +824,12 @@ class NewsCollector:
         获取未来宏观事件日历 (原始字段透传)
         """
         if not self.api_key:
+            self.economic_calendar_meta["macro"] = self._build_disabled_meta(
+                symbol="MACRO",
+                data_type="economic_calendar",
+                reason="missing_api_key",
+            )
+            self.cache_stats["economic_calendar_disabled"] += 1
             return []
 
         horizon_days = days_ahead if days_ahead is not None else int(config.EVENTS["future_days"])

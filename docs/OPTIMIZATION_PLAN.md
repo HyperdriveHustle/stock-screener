@@ -8,6 +8,116 @@ Status: `design_baseline`
 
 ---
 
+## 0. 当前状态快照（2026-03-06）
+
+这是本次阶段性重构后的真实验证快照，供下一次继续工作时快速对齐上下文。
+
+### 0.1 当前运行基线
+
+- 当前默认 universe 还不是全市场主表。
+- `data/symbol_registry.json` 目前不存在。
+- 因此系统默认回退到 `providers/universe.py` 中的 `FALLBACK_TICKERS`，当前规模为 `102` 只。
+- ETF 现在支持通过环境变量 `ALLOW_ETF_CANDIDATES=1` 进入 `eligibility -> triage -> deep_analysis -> judge`，默认仍关闭。
+
+### 0.2 已完成的代表性验证
+
+- `GOOGL,NVDA` strict dry-run 已跑通：
+  - 修好的 provider 可让 `GOOGL` 稳定进入 `deep_analysis`
+  - `triage / deep_analysis / final judge` 均可触发 live LLM
+- 10 标的行业代表 dry-run 已跑通：
+  - `NVDA, GOOGL, AMZN, WMT, JPM, XOM, UNH, CAT, XLU, XLRE`
+  - 开启 `ALLOW_ETF_CANDIDATES=1`
+  - 关闭逐条新闻语义打标的实用版 session：`20260306_pre_market_080732`
+  - 保留逐条新闻语义打标的严格版 session：`20260306_pre_market_075106`
+
+### 0.3 从验证暴露出的直接问题
+
+1. 当前 universe 仍过小
+- 默认只扫描 `102` 只 fallback seed。
+- 这只能做架构验证，不能代表接近全市场的行为。
+
+2. ETF 接入已经不是主要阻塞点
+- `XLU`、`XLRE` 已经完整通过 `eligibility / triage / deep_analysis`。
+- 说明“ETF 能不能进 pipeline”已经可控。
+
+3. `triage` 压缩力度不足
+- 在 10 标的样本中，出现了 `9 recall -> 9 triage -> 9 deep`。
+- 这意味着当前 triage 更像“解释器”，还不像真正的压缩漏斗。
+
+4. `cross_stock_judge` 仍容易超时
+- 当 deep candidates 达到 `9` 只时，live MiniMax 在 `60s` 下仍会超时并回退 `fallback_proxy`。
+- 这说明 final judge 的 payload 仍然偏大，且候选数上限过高。
+
+5. LLM funnel 当前时延偏高
+- 多标的时，triage / deep / final 基本是串行执行。
+- 逐条新闻语义打标会进一步拉长总耗时。
+
+6. 当前价格阈值会误伤部分行业代表
+- 10 标的样本里 `CAT` 因 `price_out_of_range` 被 eligibility 剔除。
+- 如果后续目标是更广的行业覆盖，`max_price=500` 需要重新审视。
+
+### 0.4 下一轮应优先做的优化
+
+下一次继续开发时，优先级建议如下。
+
+#### P0: 先解决漏斗失真和超时问题
+
+1. 给 triage 增加明确的 top-k 压缩
+- 不要让 recall candidate 几乎原样流入 deep analysis。
+- 推荐：
+  - `max_symbols_for_triage`: 先按 generator recall score 截断
+  - triage 后仅保留 `top 3-5` 进入 deep analysis
+
+2. 给 deep analysis 增加硬预算
+- 当前 `deep_analysis_ticker_count` 过大时，final judge 几乎必然膨胀。
+- 推荐 deep 阶段只保留高置信度或高 market-fit 的少数标的进入 final judge。
+
+3. 压缩 final judge 的输入
+- 不再把完整 dossier 信息重复送入最终比较。
+- 改为：
+  - `compact final capsule`
+  - 只保留 trigger / invalidation / confidence / sector-fit / risk flags / overlap
+
+4. 给 final judge 增加降级策略
+- 当候选数超过阈值时，先做一次 pre-rank，再把 top subset 送入 live judge。
+
+#### P1: 提升吞吐和默认运行可用性
+
+5. 让 triage / deep_analysis 支持有限并发
+- 例如并发 `2-3`，而不是完全串行。
+- 重点控制：
+  - API 限速
+  - 超时累计
+  - artifact 写入顺序与 trace 完整性
+
+6. 把逐条新闻语义打标改成增强模式
+- 默认验证路径建议关闭。
+- 只在：
+  - 单票深挖
+  - 小规模候选复核
+  - 离线分析
+  时开启。
+
+#### P2: 扩 universe，避免只在小样本上过拟合
+
+7. 建立本地 `symbol_registry` 主表
+- 先从可维护的 `US common stocks + selected ETFs` 起步。
+- 至少要摆脱“102 只 fallback seed”的默认运行方式。
+
+8. 把 ETF 政策明确成配置而不是临时验证行为
+- 需要区分：
+  - ETF 是否允许进入候选池
+  - ETF 是否允许进入 final top-N
+  - ETF 是否只作为 sector proxy / risk overlay
+
+#### P3: 重新审视 eligibility 的硬阈值
+
+9. 检查 `max_price`、`min_avg_volume`、`min_market_cap`
+- 这些阈值目前仍可能误伤高质量但高价的行业代表。
+- 尤其是价格阈值，不应变成行业覆盖缺口的来源。
+
+---
+
 ## 1. 目标重述
 
 系统的大目标是：
@@ -1081,4 +1191,3 @@ Prompt 中必须显式标注：
 
 - 能回填 forward return 和最大回撤
 - 能按 stage 分析误杀和误选
-

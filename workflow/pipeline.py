@@ -370,8 +370,8 @@ def _evaluate_eligibility(
 
     if not registry_record.get("is_active", True):
         reasons.append("inactive_symbol")
-    if registry_record.get("is_etf"):
-        reasons.append("not_common_stock")
+    if registry_record.get("is_etf") and not config.UNIVERSE.get("allow_etf_candidates", False):
+        reasons.append("etf_excluded")
     if registry_record.get("is_adr"):
         reasons.append("adr_excluded")
     if registry_record.get("is_spac"):

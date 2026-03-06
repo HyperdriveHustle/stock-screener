@@ -2,6 +2,29 @@
 
 本文件记录 `stock-screener` 的迭代变更（优化 / 改动 / 修复）。
 
+## 2026-03-06
+
+### Changed
+- `universe_eligibility` 现在支持通过环境变量 `ALLOW_ETF_CANDIDATES=1` 放开 ETF，默认仍保持关闭，避免直接改变既有股票筛选行为。
+- `README.md` 和 `.env.example` 补充了 ETF 验证和相关配置说明。
+
+### Validated
+- 跑通 `GOOGL,NVDA` 的 strict dry-run，确认修好的 provider 可以让 `GOOGL` 稳定进入 `deep_analysis`。
+- 跑通 `NVDA,GOOGL,AMZN,WMT,JPM,XOM,UNH,CAT,XLU,XLRE` 的代表性 10 标的 dry-run。
+- 确认 `XLU`、`XLRE` 在放开 ETF 后可完整通过 `eligibility -> triage -> deep_analysis`。
+- 确认当前默认 universe 仍为 `fallback seed`，规模 `102` 只，因为 `data/symbol_registry.json` 尚未建立。
+
+### Findings
+- 10 标的验证中，`CAT` 因 `price_out_of_range` 在 eligibility 被剔除，说明当前价格阈值会拦掉部分高价行业代表。
+- `triage` 当前压缩力度偏弱，10 标的样本中出现 `9 recall -> 9 deep`，漏斗第二层没有有效收缩。
+- `cross_stock_judge` 在 `9` 个 deep candidates 时，live MiniMax 在 `60s` 下仍容易超时并回退 `fallback_proxy`。
+- 逐条新闻语义打标在多标的回归里显著拉长总耗时，更适合作为增强模式，而不是默认验证路径。
+
+### Next
+- 建立本地 `symbol_registry` 主表，替代 `fallback seed` 作为默认 universe。
+- 为 `triage` 和 `deep_analysis` 增加更严格的 `top-k` / 预算控制。
+- 压缩 final judge payload，并给 LLM funnel 引入有限并发，降低端到端延迟和超时风险。
+
 ## 2026-03-05
 
 ### Added

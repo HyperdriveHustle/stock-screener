@@ -44,6 +44,7 @@ UNIVERSE = {
     "max_price": 500.0,          # 最高股价 ($)
     "min_avg_volume": 500_000,   # 最低 20 日日均成交量
     "min_market_cap": 3e8,       # 最低市值 ($300M)
+    "allow_etf_candidates": _env_bool("ALLOW_ETF_CANDIDATES", False),
 }
 
 # ============================================================

@@ -9,7 +9,7 @@
 - 所有阶段都落结构化 artifacts
 - 输出目录统一到 `output/runs/<session_id>/`
 
-设计基线见 [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)，原则见 [PRINCIPAL.md](./PRINCIPAL.md)。
+设计基线见 [docs/OPTIMIZATION_PLAN.md](./docs/OPTIMIZATION_PLAN.md)，原则见 [docs/PRINCIPAL.md](./docs/PRINCIPAL.md)。
 
 ## 目录结构
 
@@ -105,6 +105,7 @@ DISCORD_WEBHOOK_URL=your_discord_webhook_url
 ENABLE_SEMANTIC_TAGGING=0
 SEMANTIC_MAX_ARTICLES_PER_STOCK=5
 LLM_TIMEOUT_SECONDS=60
+ALLOW_ETF_CANDIDATES=1
 ```
 
 用途：
@@ -112,6 +113,7 @@ LLM_TIMEOUT_SECONDS=60
 - `ENABLE_SEMANTIC_TAGGING=0`: 保留 Finnhub 新闻，但关闭逐条新闻语义打标
 - `SEMANTIC_MAX_ARTICLES_PER_STOCK`: 控制语义打标请求量
 - `LLM_TIMEOUT_SECONDS`: 放宽 triage/deep/final 的 live LLM 等待时间
+- `ALLOW_ETF_CANDIDATES=1`: 允许 ETF 进入 eligibility 和后续 LLM 流程
 
 ## 运行
 
@@ -128,6 +130,10 @@ LLM_TIMEOUT_SECONDS=60
 # 带 Finnhub 新闻 + live LLM，但关闭逐条新闻语义打标
 ENABLE_SEMANTIC_TAGGING=0 LLM_TIMEOUT_SECONDS=60 \
 .venv/bin/python main.py --tickers AAPL --dry-run
+
+# 允许 ETF 进入候选池，做多板块代表性验证
+ALLOW_ETF_CANDIDATES=1 ENABLE_SEMANTIC_TAGGING=0 LLM_TIMEOUT_SECONDS=60 \
+.venv/bin/python main.py --tickers NVDA,GOOGL,AMZN,WMT,JPM,XOM,UNH,CAT,XLU,XLRE --dry-run
 
 # 测试 Discord webhook
 .venv/bin/python main.py --test
@@ -164,12 +170,22 @@ output/runs/<session_id>/
 - `py_compile` 静态编译
 - `AAPL/MSFT` 带 Finnhub 新闻 dry-run
 - `AAPL` 带 Finnhub 新闻和 live MiniMax funnel 的 dry-run
+- `GOOGL/NVDA` 带 Finnhub 新闻和 live MiniMax funnel 的 strict dry-run
+- `NVDA,GOOGL,AMZN,WMT,JPM,XOM,UNH,CAT,XLU,XLRE` 的 10 标的 dry-run
 
 验证中发现并已修复：
 
 - `event_generator` 不再把过去事件误判为未来催化
 - `yfinance` 缓存改到项目内可写目录
 - live LLM deep/final 传输层做了轻量化，减少超时
+- ETF 现在可通过 `ALLOW_ETF_CANDIDATES=1` 进入 eligibility 和后续 LLM funnel
+
+## 当前限制
+
+- 当前默认 universe 仍是 `fallback seed`，规模为 `102` 只；`data/symbol_registry.json` 缺失时不会自动扩展到更大的全市场主表。
+- 10 标的回归验证显示，`triage` 目前压缩力度偏弱，`9 recall -> 9 deep`，说明漏斗第二层还不够收敛。
+- `cross_stock_judge` 在 `9` 个 deep candidates 时，live MiniMax 仍可能在 `60s` 超时后回退到 `fallback_proxy`。
+- 当前 LLM funnel 基本是串行执行；当候选数上来时，triage/deep/final 的总时延会迅速放大。
 
 ## 注意
 

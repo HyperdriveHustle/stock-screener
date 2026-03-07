@@ -2,19 +2,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any
 
 from runtime import config
+from runtime.utils import safe_float as _safe_float
 from analysis.scorer import StockFeatures
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None or value == "":
-            return None
-        return float(value)
-    except Exception:
-        return None
 
 
 def _parse_news_ts(article: dict) -> int:
@@ -26,6 +17,8 @@ def _parse_news_ts(article: dict) -> int:
 
 def build_market_context_compact(market_context: dict, features: list[StockFeatures]) -> dict:
     total = len(features)
+    min_sample = int(config.MARKET_CONTEXT.get("min_sample_size_for_breadth_signal", 0))
+    breadth_usable = total >= max(1, min_sample)
     advancers = 0
     above_ma20 = 0
     above_ma50 = 0
@@ -80,11 +73,14 @@ def build_market_context_compact(market_context: dict, features: list[StockFeatu
             "symbol_groups": dict((market_context.get("market_regime") or {}).get("symbol_groups") or {}),
         },
         "breadth": {
-            "universe_sample_size": total,
-            "advancers_ratio": round(advancers / total, 3) if total else None,
-            "above_ma20_ratio": round(above_ma20 / total, 3) if total else None,
-            "above_ma50_ratio": round(above_ma50 / total, 3) if total else None,
-            "moderate_or_higher_gap_ratio": round(strong_gappers / total, 3) if total else None,
+            "scope": "eligible_symbol_sample",
+            "sample_size": total,
+            "usable_as_market_breadth": breadth_usable,
+            "minimum_sample_size_required": min_sample,
+            "advancers_ratio": round(advancers / total, 3) if total and breadth_usable else None,
+            "above_ma20_ratio": round(above_ma20 / total, 3) if total and breadth_usable else None,
+            "above_ma50_ratio": round(above_ma50 / total, 3) if total and breadth_usable else None,
+            "moderate_or_higher_gap_ratio": round(strong_gappers / total, 3) if total and breadth_usable else None,
         },
         "leadership": {
             "top_sectors": sector_leadership[:5],

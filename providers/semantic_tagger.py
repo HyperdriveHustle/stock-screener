@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime, timedelta
 from typing import Any
 
 import requests
 
 from runtime import config
+from runtime.utils import first_json_object as _first_json_object
+from runtime.utils import safe_float as _safe_float
 from providers.cache_store import SQLiteCache
 
 logger = logging.getLogger(__name__)
@@ -40,17 +41,6 @@ _IMPACT_MAP = {
     "mid": "medium",
     "low": "low",
 }
-
-
-def _safe_float(v: Any) -> float | None:
-    try:
-        if v is None or v == "":
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
 def _clamp_float(v: Any, lo: float, hi: float, default: float) -> float:
     parsed = _safe_float(v)
     if parsed is None:
@@ -66,44 +56,6 @@ def _normalize_sentiment(v: Any) -> str:
 def _normalize_impact(v: Any) -> str:
     key = str(v or "").strip().lower()
     return _IMPACT_MAP.get(key, "medium")
-
-
-def _first_json_object(text: str) -> dict | None:
-    if not text:
-        return None
-
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
-        stripped = re.sub(r"\s*```$", "", stripped)
-
-    try:
-        payload = json.loads(stripped)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-
-    start = stripped.find("{")
-    if start < 0:
-        return None
-
-    depth = 0
-    for idx in range(start, len(stripped)):
-        ch = stripped[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                snippet = stripped[start:idx + 1]
-                try:
-                    payload = json.loads(snippet)
-                    if isinstance(payload, dict):
-                        return payload
-                except Exception:
-                    return None
-    return None
 
 
 def _normalize_semantic_payload(payload: dict) -> dict:

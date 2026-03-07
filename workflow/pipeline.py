@@ -10,6 +10,9 @@ import pandas as pd
 import yfinance as yf
 
 from runtime import config
+from runtime.utils import normalize_history_frame as _normalize_history_frame
+from runtime.utils import safe_float as _safe_float
+from runtime.utils import safe_int as _safe_int
 from analysis.analyzer import NewsSentimentAnalyzer, TechnicalAnalyzer, TechnicalProfile
 from workflow.artifact_builders import (
     build_compact_card,
@@ -36,22 +39,6 @@ def _configure_yfinance_cache() -> None:
     setter = getattr(yf, "set_tz_cache_location", None)
     if callable(setter):
         setter(cache_dir)
-
-
-def _normalize_history_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
-    if df is None or df.empty:
-        return None
-    frame = df.copy()
-    if isinstance(frame.columns, pd.MultiIndex):
-        frame.columns = frame.columns.get_level_values(0)
-    if "Close" not in frame.columns:
-        return None
-    frame = frame.dropna(how="all")
-    if getattr(frame.index, "tz", None) is not None:
-        frame.index = frame.index.tz_convert(None)
-    return frame
-
-
 def _safe_last_close(df: pd.DataFrame | None) -> float | None:
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -297,26 +284,6 @@ def _extract_company_event_list(ticker: str, ticker_info: dict | None) -> list[d
         )
     events.sort(key=lambda item: item["event_time"])
     return events
-
-
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None or value == "":
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
-def _safe_int(value: Any) -> int | None:
-    try:
-        if value is None or value == "":
-            return None
-        return int(value)
-    except Exception:
-        return None
-
-
 def _avg_dollar_volume(history_df: pd.DataFrame | None, window: int = 20) -> float:
     if history_df is None or history_df.empty:
         return 0.0
@@ -973,18 +940,39 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
             as_of=session.run_at_market_tz,
         )
 
-    deep_candidates = [
+    keep_candidates = [
         ticker for ticker, payload in triage_outputs.items()
-        if str(payload.get("triage_verdict") or "").lower() in {"keep", "observe"}
+        if str(payload.get("triage_verdict") or "").lower() == "keep"
     ]
-    deep_candidates.sort(
+    observe_candidates = [
+        ticker for ticker, payload in triage_outputs.items()
+        if str(payload.get("triage_verdict") or "").lower() == "observe"
+    ]
+    keep_candidates.sort(
         key=lambda ticker: (
-            str(triage_outputs[ticker].get("triage_verdict")) == "keep",
             float(triage_outputs[ticker].get("triage_confidence") or 0),
             float(generator_map[ticker]["recall_score"]),
         ),
         reverse=True,
     )
+    observe_candidates.sort(
+        key=lambda ticker: (
+            float(triage_outputs[ticker].get("triage_confidence") or 0),
+            float(generator_map[ticker]["recall_score"]),
+        ),
+        reverse=True,
+    )
+    observe_budget = max(0, int(config.BUDGET_CONFIG.get("max_observe_for_deep_analysis", 0)))
+    deep_candidates = keep_candidates + observe_candidates[:observe_budget]
+    skipped_observe_candidates = set(observe_candidates[observe_budget:])
+    for ticker in skipped_observe_candidates:
+        traces[ticker].add_stage(
+            stage="deep_analysis_observe_budget",
+            gate_type="system_gate",
+            decision="reject",
+            reason_codes=["observe_budget_control"],
+            as_of=session.run_at_market_tz,
+        )
 
     deep_budget = int(config.BUDGET_CONFIG["max_symbols_for_deep_analysis"])
     deep_tickers = deep_candidates[:deep_budget]
@@ -1101,9 +1089,29 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
             as_of=session.run_at_market_tz,
         )
 
+    judge_pool_limit = max(1, int(config.BUDGET_CONFIG.get("max_candidates_for_final_judge", len(deep_outputs))))
+    judge_candidates = sorted(
+        deep_outputs.keys(),
+        key=lambda ticker: (
+            float(deep_outputs[ticker].get("confidence") or 0),
+            float(triage_outputs[ticker].get("triage_confidence") or 0),
+        ),
+        reverse=True,
+    )
+    judge_tickers = judge_candidates[:judge_pool_limit]
+    skipped_judge_candidates = set(judge_candidates[judge_pool_limit:])
+    for ticker in skipped_judge_candidates:
+        traces[ticker].add_stage(
+            stage="cross_stock_judge_budget",
+            gate_type="system_gate",
+            decision="reject",
+            reason_codes=["judge_budget_control"],
+            as_of=session.run_at_market_tz,
+        )
+
     final_selection_request, final_selection = llm_runner.final_judge(
         market_context_compact=market_context_compact,
-        deep_analysis_by_ticker=deep_outputs,
+        deep_analysis_by_ticker={ticker: deep_outputs[ticker] for ticker in judge_tickers},
         selection_count=int(config.BUDGET_CONFIG["final_selection_count"]),
     )
     artifact_store.write_json("judge/final_selection_request.json", final_selection_request)
@@ -1115,6 +1123,9 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
     for ticker in triage_tickers:
         if ticker not in deep_outputs:
             traces[ticker].final_status = "triage_rejected"
+            continue
+        if ticker in skipped_judge_candidates:
+            traces[ticker].final_status = "judge_rejected"
             continue
         selected = ticker in selected_tickers
         judge_item = decision_by_ticker.get(ticker, {})

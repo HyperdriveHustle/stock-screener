@@ -13,9 +13,5 @@ ta>=0.11.0
 pandas>=2.0.0
 numpy>=1.24.0
 
-# HTML 解析 (用于获取 S&P 500 成分股列表)
-lxml>=5.0.0
-html5lib>=1.1
-
 # 环境变量
 python-dotenv>=1.0.0

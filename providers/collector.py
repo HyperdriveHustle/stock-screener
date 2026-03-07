@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Any
 
@@ -18,6 +18,8 @@ import requests
 import yfinance as yf
 
 from runtime import config
+from runtime.utils import safe_float as _safe_float
+from runtime.utils import safe_int as _safe_int
 from providers.cache_store import SQLiteCache
 
 logger = logging.getLogger(__name__)
@@ -46,22 +48,12 @@ def _build_retrieval_meta(
         meta["data_type"] = data_type
     meta["retrieval_mode"] = retrieval_mode
     return meta
-
-
-def _safe_float(v: Any) -> float | None:
-    try:
-        if v is None or v == "":
-            return None
-        return float(v)
-    except Exception:
+def _parse_expiry_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
         return None
-
-
-def _safe_int(v: Any) -> int | None:
     try:
-        if v is None or v == "":
-            return None
-        return int(v)
+        return datetime.fromisoformat(text).date()
     except Exception:
         return None
 
@@ -1045,7 +1037,14 @@ class OptionsCollector:
             expiries = []
 
         expiry_limit = int(config.OPTIONS["expiries_limit"])
-        selected_expiries = expiries[: max(0, expiry_limit)]
+        today_utc = datetime.utcnow().date()
+        future_expiries = []
+        for expiry in expiries:
+            expiry_date = _parse_expiry_date(expiry)
+            if expiry_date is None or expiry_date < today_utc:
+                continue
+            future_expiries.append(expiry)
+        selected_expiries = future_expiries[: max(0, expiry_limit)]
         if not selected_expiries:
             payload = {}
         else:
@@ -1131,7 +1130,8 @@ class OptionsCollector:
             days_to_nearest = None
             if nearest_expiry:
                 try:
-                    days_to_nearest = (datetime.fromisoformat(nearest_expiry) - datetime.utcnow()).days
+                    nearest_date = datetime.fromisoformat(nearest_expiry).date()
+                    days_to_nearest = max(0, (nearest_date - today_utc).days)
                 except Exception:
                     days_to_nearest = None
 

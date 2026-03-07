@@ -129,7 +129,6 @@ PREMARKET = {
 NEWS = {
     "lookback_hours": 48,           # 新闻回溯时间 (小时)
     "max_articles_per_stock": 20,   # 每只股票最多处理文章数
-    "max_tickers_for_news": 100,    # 每轮执行新闻采集的股票上限
     "finnhub_rate_limit": 55,       # Finnhub 免费版每分钟请求数上限
     "market_news_categories": ["general", "forex", "merger"],  # 市场新闻类别
     "enable_provider_sentiment": True,
@@ -249,6 +248,8 @@ BUDGET_CONFIG = {
     "max_symbols_for_news": 150,
     "max_symbols_for_triage": 80,
     "max_symbols_for_deep_analysis": 20,
+    "max_observe_for_deep_analysis": 4,
+    "max_candidates_for_final_judge": 8,
     "final_selection_count": 10,
     "enable_live_llm": bool(MINIMAX_API_KEY),
     "llm_timeout_seconds": _env_int("LLM_TIMEOUT_SECONDS", 25),
@@ -313,6 +314,7 @@ PIPELINE_CONFIG = {
 # ============================================================
 MARKET_CONTEXT = {
     "return_windows_days": [1, 5, 20],
+    "min_sample_size_for_breadth_signal": 100,
     "symbol_groups": {
         "equity": ["SPY", "QQQ", "IWM"],
         "sector_etf": ["SMH", "SOXX", "XLK", "XLF", "XLE", "XLV"],

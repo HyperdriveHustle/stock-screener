@@ -5,7 +5,6 @@ SQLite 缓存层
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -13,6 +12,8 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from runtime.utils import news_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -187,15 +188,7 @@ class SQLiteCache:
     @staticmethod
     def news_fingerprint(article: dict) -> str:
         """为新闻生成稳定指纹"""
-        base = "|".join(
-            [
-                str(article.get("url", "")).strip(),
-                str(article.get("headline", "")).strip(),
-                str(article.get("datetime", "")).strip(),
-                str(article.get("source", "")).strip(),
-            ]
-        )
-        return hashlib.sha256(base.encode("utf-8")).hexdigest()
+        return news_fingerprint(article)
 
     def store_news_and_get_recent(
         self,
@@ -258,4 +251,3 @@ class SQLiteCache:
     def close(self):
         with self._lock:
             self.conn.close()
-

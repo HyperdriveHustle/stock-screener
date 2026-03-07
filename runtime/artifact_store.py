@@ -7,11 +7,14 @@ from typing import Any
 
 class ArtifactStore:
     def __init__(self, root_dir: str, session_id: str):
-        self.root_dir = os.path.join(root_dir, session_id)
+        self.root_dir = os.path.abspath(os.path.join(root_dir, session_id))
         os.makedirs(self.root_dir, exist_ok=True)
 
     def abs_path(self, relative_path: str) -> str:
-        return os.path.join(self.root_dir, relative_path)
+        candidate = os.path.abspath(os.path.join(self.root_dir, relative_path))
+        if os.path.commonpath([self.root_dir, candidate]) != self.root_dir:
+            raise ValueError(f"artifact path escapes root_dir: {relative_path}")
+        return candidate
 
     def write_json(self, relative_path: str, payload: Any) -> str:
         path = self.abs_path(relative_path)

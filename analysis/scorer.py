@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import logging
-import hashlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,27 +13,10 @@ import numpy as np
 import pandas as pd
 
 from runtime import config
+from runtime.utils import news_fingerprint
+from runtime.utils import safe_float as _safe_float
+from runtime.utils import safe_int as _safe_int
 from analysis.analyzer import TechnicalProfile
-
-logger = logging.getLogger(__name__)
-
-
-def _safe_float(v: Any) -> float | None:
-    try:
-        if v is None or v == "":
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
-def _safe_int(v: Any) -> int | None:
-    try:
-        if v is None or v == "":
-            return None
-        return int(v)
-    except Exception:
-        return None
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -93,18 +74,6 @@ def _normalize_provenance(meta: dict | None) -> dict:
         if key not in normalized:
             normalized[key] = value
     return normalized
-
-
-def _article_fingerprint(article: dict) -> str:
-    base = "|".join(
-        [
-            str((article or {}).get("url", "")).strip(),
-            str((article or {}).get("headline", "")).strip(),
-            str((article or {}).get("datetime", "")).strip(),
-            str((article or {}).get("source", "")).strip(),
-        ]
-    )
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 
 def _extract_numeric_series(df: pd.DataFrame | None, column: str) -> pd.Series:
@@ -604,72 +573,6 @@ def _build_support_resistance(history_df: pd.DataFrame | None) -> dict:
     }
 
 
-def _build_information_scope() -> dict:
-    stock_specific_paths = [
-        "stock_context.ticker",
-        "stock_context.company_name",
-        "stock_context.sector",
-        "stock_context.industry",
-        "stock_context.exchange",
-        "stock_context.country",
-        "stock_context.currency",
-        "stock_context.technical_priority",
-        "stock_context.technical",
-        "stock_context.premarket",
-        "stock_context.news",
-        "stock_context.fundamentals",
-        "stock_context.valuation",
-        "stock_context.analyst",
-        "stock_context.events",
-        "stock_context.liquidity",
-        "stock_context.fact_sheet",
-        "stock_context.ev_inputs",
-        "stock_context.drawdown_context",
-        "stock_context.execution_context",
-        "stock_context.valuation_consistency",
-        "stock_context.ohlc_recent",
-        "stock_context.support_resistance",
-        "stock_context.options_summary",
-        "stock_context.tags",
-        "stock_context.data_quality",
-        "stock_context.data_provenance",
-        "stock_context.source_meta",
-    ]
-
-    return {
-        "stock_specific_sections": stock_specific_paths,
-        "hybrid_sections": [
-            {
-                "section": "stock_context.technical.relative_strength",
-                "external_reference": "SPY",
-                "scope": "hybrid",
-            },
-            {
-                "section": "stock_context.market_linkage",
-                "external_reference": "SPY",
-                "scope": "hybrid",
-            },
-            {
-                "section": "stock_context.sector_context",
-                "external_reference": "same_sector_peers",
-                "scope": "hybrid",
-            },
-            {
-                "section": "stock_context.upcoming_events",
-                "external_reference": "macro_calendar_and_peer_events",
-                "scope": "hybrid",
-            },
-        ],
-        "market_shared_sections": [
-            "market_context.market_summary",
-            "market_context.market_regime",
-            "market_context.market_news_digest",
-            "market_context.upcoming_macro_events",
-            "market_context.data_provenance.market_*",
-        ],
-    }
-
-
 def _iter_leaf_values(value: Any):
     if isinstance(value, dict):
         for v in value.values():
@@ -836,7 +739,7 @@ class FeatureAssembler:
                 "related": article.get("related", ""),
                 "image": article.get("image", ""),
             }
-            fingerprint = _article_fingerprint(article)
+            fingerprint = news_fingerprint(article)
             semantic = semantic_map.get(fingerprint)
             if isinstance(semantic, dict) and semantic:
                 compact["semantic"] = dict(semantic)
@@ -1022,48 +925,6 @@ class FeatureAssembler:
         }
 
 
-class FeatureFilter:
-    """基础过滤与排序 (不做固定权重综合分)"""
-
-    @staticmethod
-    def select(features: list[StockFeatures]) -> list[StockFeatures]:
-        selected: list[StockFeatures] = []
-        removed = {"atr": 0, "missing": 0, "technical": 0}
-
-        for f in features:
-            if f.technical_priority < config.FILTER["min_technical_priority"]:
-                removed["technical"] += 1
-                continue
-
-            tech = f.technical or {}
-            vol = tech.get("volatility", {})
-            atr_pct = _safe_float(vol.get("atr_pct"))
-            if atr_pct is None:
-                removed["missing"] += 1
-                continue
-
-            if atr_pct > config.FILTER["max_atr_pct"] or atr_pct < config.FILTER["min_atr_pct"]:
-                removed["atr"] += 1
-                continue
-
-            selected.append(f)
-
-        # 排序逻辑: 仅按技术优先级排序, 便于阅读与后续 LLM 推理
-        selected.sort(key=lambda x: x.technical_priority, reverse=True)
-
-        max_size = min(
-            int(config.FEATURES["max_candidates_for_llm"]),
-            int(config.FILTER["max_pool_size"]),
-        )
-        result = selected[:max_size]
-        logger.info(
-            f"候选过滤完成: {len(features)} → {len(selected)} → Top {len(result)} | "
-            f"剔除: 技术优先级不足={removed['technical']}, "
-            f"ATR异常={removed['atr']}, 数据缺失={removed['missing']}"
-        )
-        return result
-
-
 def build_market_context(
     market_summary: dict | None,
     market_news_bundle: dict | None,
@@ -1101,34 +962,4 @@ def build_market_context(
                 market_provenance.get("upcoming_macro_events")
             ),
         },
-    }
-
-
-def build_stock_packet(
-    feature: StockFeatures,
-    market_context: dict,
-    rank: int,
-) -> dict:
-    """
-    构建单只股票调用 LLM 的输入包
-    """
-    return {
-        "schema_version": "v3.per_stock",
-        "generated_at": datetime.utcnow().isoformat(),
-        "analysis_task": {
-            "horizon": config.LLM["analysis_horizon"],
-            "model_profiles": list(config.LLM["model_profiles"]),
-            "instruction": (
-                "Analyze this stock for short-term swing trading. "
-                "Use both market context and stock context. "
-                "Return strict JSON."
-            ),
-        },
-        "meta": {
-            "ticker": feature.ticker,
-            "rank": rank,
-        },
-        "information_scope": _build_information_scope(),
-        "market_context": market_context,
-        "stock_context": asdict(feature),
     }

@@ -7,53 +7,10 @@ from datetime import datetime
 import requests
 
 from runtime import config
+from runtime.utils import first_json_object as _first_json_object
+from runtime.utils import safe_float as _safe_float
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_float(value, default: float = 0.0) -> float:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except Exception:
-        return default
-
-
-def _first_json_object(text: str) -> dict | None:
-    if not text:
-        return None
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.strip("`")
-        if stripped.startswith("json"):
-            stripped = stripped[4:].strip()
-    try:
-        payload = json.loads(stripped)
-        if isinstance(payload, dict):
-            return payload
-    except Exception:
-        pass
-
-    start = stripped.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    for idx in range(start, len(stripped)):
-        char = stripped[idx]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                snippet = stripped[start: idx + 1]
-                try:
-                    payload = json.loads(snippet)
-                    if isinstance(payload, dict):
-                        return payload
-                except Exception:
-                    return None
-    return None
 
 
 def _compact_news_items(items: list[dict], limit: int = 5) -> list[dict]:
@@ -79,6 +36,8 @@ def _prepare_deep_payload(full_dossier: dict) -> dict:
     options_block = dict(stock_context.get("options_summary") or {})
     sector_block = dict(stock_context.get("sector_context") or {})
     events_block = dict(stock_context.get("upcoming_events") or {})
+    analyst_block = dict(stock_context.get("analyst") or {})
+    valuation_consistency = dict(stock_context.get("valuation_consistency") or {})
 
     if "recent_articles" in news_block:
         news_block["recent_articles"] = _compact_news_items(news_block.get("recent_articles") or [])
@@ -105,14 +64,18 @@ def _prepare_deep_payload(full_dossier: dict) -> dict:
             "news": news_block,
             "fundamentals": stock_context.get("fundamentals") or {},
             "valuation": stock_context.get("valuation") or {},
+            "analyst": analyst_block,
+            "valuation_consistency": valuation_consistency,
             "liquidity": stock_context.get("liquidity") or {},
             "fact_sheet": stock_context.get("fact_sheet") or {},
             "market_linkage": stock_context.get("market_linkage") or {},
             "support_resistance": stock_context.get("support_resistance") or {},
             "options_summary": {
+                "as_of": options_block.get("as_of"),
                 "aggregate": options_block.get("aggregate") or {},
                 "nearest_expiry": options_block.get("nearest_expiry"),
                 "days_to_nearest_expiry": options_block.get("days_to_nearest_expiry"),
+                "expiries": list((options_block.get("expiries") or [])[:3]),
                 "unusual_contracts": list((options_block.get("unusual_contracts") or [])[:5]),
             },
             "sector_context": sector_block,

@@ -200,7 +200,7 @@ SYSTEM = {
 CACHE = {
     "db_file": "data/cache.db",
     "history_ttl_hours": 24,         # 日线行情缓存
-    "ticker_info_ttl_minutes": 30,   # 实时信息缓存
+    "ticker_info_ttl_minutes": 15,   # 实时信息缓存 (shortened from 30 for premarket freshness)
     "company_news_ttl_minutes": 20,  # 个股新闻缓存
     "market_news_ttl_minutes": 30,   # 市场新闻缓存
     "news_sentiment_ttl_minutes": 60,
@@ -248,11 +248,11 @@ BUDGET_CONFIG = {
     "max_symbols_for_news": 150,
     "max_symbols_for_triage": 80,
     "max_symbols_for_deep_analysis": 20,
-    "max_observe_for_deep_analysis": 4,
+    "max_observe_for_deep_analysis": 2,
     "max_candidates_for_final_judge": 8,
     "final_selection_count": 10,
     "enable_live_llm": bool(MINIMAX_API_KEY),
-    "llm_timeout_seconds": _env_int("LLM_TIMEOUT_SECONDS", 25),
+    "llm_timeout_seconds": _env_int("LLM_TIMEOUT_SECONDS", 90),
 }
 
 PIPELINE_CONFIG = {

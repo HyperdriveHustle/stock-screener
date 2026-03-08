@@ -139,6 +139,22 @@ class SQLiteCache:
             "as_of": row[5],
         }
 
+    def get_stale(self, key: str) -> Any | None:
+        """读取缓存, 忽略过期时间, 用于显式 stale fallback"""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM api_cache WHERE key = ?",
+                (key,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        try:
+            return json.loads(row[0])
+        except Exception:
+            return None
+
     def set(
         self,
         key: str,

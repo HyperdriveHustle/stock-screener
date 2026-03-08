@@ -43,6 +43,12 @@ def _fmt_pct(v: float | None) -> str:
     return f"{v:+.2f}%"
 
 
+def _fmt_float(v: float | None, digits: int = 1) -> str:
+    if v is None:
+        return "N/A"
+    return f"{float(v):.{digits}f}"
+
+
 class DiscordNotifier:
     """Discord Webhook 推送"""
 
@@ -74,19 +80,26 @@ class DiscordNotifier:
         self,
         stocks: list[StockFeatures],
         market_summary: dict | None = None,
+        report_context: dict | None = None,
     ):
         """
         发送完整的每日候选特征报告到 Discord
         """
         if not stocks:
-            self._send_empty_report()
+            self._send_empty_report(report_context=report_context)
             return
 
         now = _market_now()
         date_str = now.strftime("%Y-%m-%d")
         time_str = now.strftime("%H:%M ET")
 
-        header_embed = self._build_header_embed(date_str, time_str, stocks, market_summary)
+        header_embed = self._build_header_embed(
+            date_str,
+            time_str,
+            stocks,
+            market_summary,
+            report_context=report_context,
+        )
         self._send_webhook({"embeds": [header_embed]})
 
         limit = min(len(stocks), config.DISCORD["max_stocks_in_message"])
@@ -103,7 +116,8 @@ class DiscordNotifier:
 
     def _build_header_embed(
         self, date_str: str, time_str: str,
-        stocks: list[StockFeatures], market_summary: dict | None
+        stocks: list[StockFeatures], market_summary: dict | None,
+        report_context: dict | None = None,
     ) -> dict:
         avg_priority = sum(s.technical_priority for s in stocks) / len(stocks)
         avg_coverage = sum((s.data_quality or {}).get("overall_coverage", 0) for s in stocks) / len(stocks)
@@ -125,13 +139,21 @@ class DiscordNotifier:
         if market_summary:
             market_line = (
                 f"\n**── 市场环境 ──**\n"
-                f"SPY: {market_summary.get('spy_change', 0):+.2f}% | "
-                f"VIX: {market_summary.get('vix', 0):.1f}"
+                f"SPY: {_fmt_pct(market_summary.get('spy_change'))} | "
+                f"VIX: {_fmt_float(market_summary.get('vix'), 1)}"
             )
             spy_trend = market_summary.get("spy_trend")
             if spy_trend:
                 market_line += f" | 趋势: {spy_trend}"
             description += market_line
+
+        degraded_reasons = list((report_context or {}).get("degraded_reasons") or [])
+        if degraded_reasons:
+            description += (
+                "\n\n**── 降级提示 ──**\n"
+                f"execution_mode: `{(report_context or {}).get('selection_origin', 'unknown')}`\n"
+                f"reasons: {', '.join(degraded_reasons)}"
+            )
 
         return {
             "title": f"🧩 美股特征候选池 — {date_str}",
@@ -157,6 +179,9 @@ class DiscordNotifier:
         fm = s.fundamentals or {}
         val = s.valuation or {}
         pre = s.premarket or {}
+        news_label = news.get("sentiment_label") or news.get("status") or "unavailable"
+        news_score = news.get("sentiment_score")
+        news_score_str = "N/A" if news_score is None else f"{float(news_score):.1f}"
 
         premarket_str = ""
         if pre.get("has_premarket") and pre.get("premarket_change_pct") is not None:
@@ -188,8 +213,8 @@ class DiscordNotifier:
                 "name": "📰 新闻快照",
                 "value": (
                     f"```\n"
-                    f"情绪:     {news.get('sentiment_label', 'neutral')}\n"
-                    f"情绪分:   {float(news.get('sentiment_score') or 0):.1f}\n"
+                    f"状态:     {news_label}\n"
+                    f"情绪分:   {news_score_str}\n"
                     f"新闻数:   {int(news.get('article_count') or 0)}\n"
                     f"多头词:   {int(news.get('bullish_keyword_hits') or 0)}\n"
                     f"空头词:   {int(news.get('bearish_keyword_hits') or 0)}\n"
@@ -250,7 +275,11 @@ class DiscordNotifier:
             },
         }
 
-    def _send_empty_report(self):
+    def _send_empty_report(self, report_context: dict | None = None):
+        degraded_reasons = list((report_context or {}).get("degraded_reasons") or [])
+        degraded_block = ""
+        if degraded_reasons:
+            degraded_block = "\n\n降级原因:\n• " + "\n• ".join(degraded_reasons)
         embed = {
             "title": f"🧩 美股特征候选池 — {_market_now().strftime('%Y-%m-%d')}",
             "description": (
@@ -258,6 +287,7 @@ class DiscordNotifier:
                 "可能原因:\n"
                 "• 价格/流动性/波动率过滤较严格\n"
                 "• 数据可用性不足"
+                f"{degraded_block}"
             ),
             "color": self.colors["embed_color_bearish"],
         }
@@ -282,7 +312,11 @@ class DiscordNotifier:
         return success
 
 
-def format_console_report(stocks: list[StockFeatures], market_summary: dict | None = None) -> str:
+def format_console_report(
+    stocks: list[StockFeatures],
+    market_summary: dict | None = None,
+    report_context: dict | None = None,
+) -> str:
     """
     生成控制台文本报告 (同时用于保存到文件)
     """
@@ -295,13 +329,19 @@ def format_console_report(stocks: list[StockFeatures], market_summary: dict | No
 
     if market_summary:
         market_line = (
-            f"  SPY: {market_summary.get('spy_change', 0):+.2f}%  |  "
-            f"VIX: {market_summary.get('vix', 0):.1f}"
+            f"  SPY: {_fmt_pct(market_summary.get('spy_change'))}  |  "
+            f"VIX: {_fmt_float(market_summary.get('vix'), 1)}"
         )
         spy_trend = market_summary.get("spy_trend")
         if spy_trend:
             market_line += f"  |  趋势: {spy_trend}"
         lines.append(market_line)
+        lines.append("-" * 72)
+
+    degraded_reasons = list((report_context or {}).get("degraded_reasons") or [])
+    if degraded_reasons:
+        lines.append(f"  execution_mode: {(report_context or {}).get('selection_origin', 'unknown')}")
+        lines.append(f"  降级原因: {', '.join(degraded_reasons)}")
         lines.append("-" * 72)
 
     if not stocks:
@@ -317,6 +357,9 @@ def format_console_report(stocks: list[StockFeatures], market_summary: dict | No
         vp = tech.get("volume_price", {})
         news = s.news or {}
         fm = s.fundamentals or {}
+        news_label = news.get("sentiment_label") or news.get("status") or "unavailable"
+        news_score = news.get("sentiment_score")
+        news_score_str = "N/A" if news_score is None else str(news_score)
 
         lines.append(f"\n  #{i + 1}  {s.ticker:6s}  技术优先级: {s.technical_priority:.1f}")
         lines.append(f"  {s.company_name} | {s.sector or 'N/A'} | 市值: {_fmt_cap(fm.get('market_cap'))}")
@@ -328,8 +371,8 @@ def format_console_report(stocks: list[StockFeatures], market_summary: dict | No
             f"RS/SPY: {_fmt_pct(rs.get('rs_vs_spy_20d_pct'))}"
         )
         lines.append(
-            f"  新闻: {news.get('sentiment_label', 'neutral')} "
-            f"(score={news.get('sentiment_score', 50)}, count={news.get('article_count', 0)})"
+            f"  新闻: {news_label} "
+            f"(score={news_score_str}, count={news.get('article_count', 0)})"
         )
         if s.tags:
             lines.append(f"  标签: {', '.join(s.tags)}")

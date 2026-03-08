@@ -39,6 +39,20 @@ def _configure_yfinance_cache() -> None:
     setter = getattr(yf, "set_tz_cache_location", None)
     if callable(setter):
         setter(cache_dir)
+
+
+def _build_gap_meta(source: str, symbol: str, data_type: str, reason: str, retrieval_mode: str) -> dict:
+    now_iso = datetime.utcnow().isoformat()
+    return {
+        "source": source,
+        "symbol": symbol,
+        "data_type": data_type,
+        "as_of": now_iso,
+        "fetched_at": now_iso,
+        "expires_at": "",
+        "retrieval_mode": retrieval_mode,
+        "disabled_reason": reason,
+    }
 def _safe_last_close(df: pd.DataFrame | None) -> float | None:
     if df is None or df.empty or "Close" not in df.columns:
         return None
@@ -181,11 +195,11 @@ def get_market_summary(
     vix_as_of_override: str = "",
 ) -> dict:
     summary = {
-        "spy_change": 0.0,
+        "spy_change": None,
         "spy_close": None,
         "spy_prev_close": None,
         "spy_as_of": "",
-        "vix": 0.0,
+        "vix": None,
         "vix_as_of": vix_as_of_override or "",
     }
     if spy_data is not None and len(spy_data) >= 2:
@@ -256,6 +270,34 @@ def _parse_event_datetime(value: object) -> datetime | None:
         return _to_naive_utc(datetime.fromisoformat(text))
     except Exception:
         return None
+
+
+def _load_static_macro_calendar(market_date: str) -> list[dict]:
+    """Load upcoming events from static macro calendar file as fallback."""
+    import json as _json
+    from pathlib import Path
+
+    cal_path = Path(__file__).resolve().parent.parent / "data" / "macro_calendar_2026.json"
+    if not cal_path.exists():
+        return []
+    try:
+        data = _json.loads(cal_path.read_text())
+        events = data.get("events", [])
+        ref_date = market_date or datetime.utcnow().strftime("%Y-%m-%d")
+        future_days = int(config.EVENTS.get("future_days", 14))
+        from datetime import timedelta as _td
+
+        ref_dt = datetime.strptime(ref_date, "%Y-%m-%d")
+        end_dt = ref_dt + _td(days=future_days)
+        filtered = []
+        for ev in events:
+            d = ev.get("date", "")
+            if ref_date <= d <= end_dt.strftime("%Y-%m-%d"):
+                filtered.append(ev)
+        return filtered
+    except Exception as exc:
+        logger.warning("Failed to load static macro calendar: %s", exc)
+        return []
 
 
 def _extract_company_event_list(ticker: str, ticker_info: dict | None) -> list[dict]:
@@ -667,6 +709,10 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
     if not registry_records:
         raise RuntimeError("No symbols available from registry")
 
+    degraded_reasons: set[str] = set()
+    if any("fallback_seed" in (record.get("universe_tags") or []) for record in registry_records):
+        degraded_reasons.add("fallback_seed_universe")
+
     tickers = [record["ticker"] for record in registry_records]
     traces = {
         ticker: SymbolTrace(
@@ -741,6 +787,8 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
     news_budget = int(config.BUDGET_CONFIG["max_symbols_for_news"])
     news_tickers = eligible_tickers[:news_budget]
     skipped_for_news = set(eligible_tickers[news_budget:])
+    if skipped_for_news:
+        degraded_reasons.add("partial_news_coverage_budget")
     for ticker in skipped_for_news:
         traces[ticker].add_stage(
             stage="news_budget_gate",
@@ -762,11 +810,43 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         artifact_store.write_json(f"symbols/{ticker}/raw/news.json", news_by_ticker.get(ticker, []))
         artifact_store.write_json(f"symbols/{ticker}/raw/news_sentiment.json", provider_news_sentiments.get(ticker, {}))
     for ticker in skipped_for_news:
+        news_collector.company_news_meta[ticker] = _build_gap_meta(
+            source="finnhub",
+            symbol=ticker,
+            data_type="company_news",
+            reason="budget_control",
+            retrieval_mode="skipped",
+        )
+        news_collector.news_sentiment_meta[ticker] = _build_gap_meta(
+            source="finnhub",
+            symbol=ticker,
+            data_type="news_sentiment",
+            reason="budget_control",
+            retrieval_mode="skipped",
+        )
+        semantic_tagger.semantic_meta[ticker] = {
+            **_build_gap_meta(
+                source="semantic_tagger",
+                symbol=ticker,
+                data_type="news_semantic",
+                reason="budget_control",
+                retrieval_mode="skipped",
+            ),
+            "article_count": 0,
+        }
         artifact_store.write_json(f"symbols/{ticker}/raw/news.json", [])
         artifact_store.write_json(f"symbols/{ticker}/raw/news_sentiment.json", {})
 
     market_news_bundle = news_collector.fetch_market_news_bundle()
     macro_events = news_collector.fetch_economic_calendar(days_ahead=int(config.EVENTS["future_days"]))
+    if not macro_events:
+        macro_events = _load_static_macro_calendar(session_dict.get("market_date", ""))
+        if macro_events:
+            logger.info("Using static macro calendar fallback: %d events", len(macro_events))
+    if any(meta.get("disabled_reason") for meta in news_collector.get_market_news_meta_bundle().values()):
+        degraded_reasons.add("market_news_unavailable")
+    if news_collector.get_economic_calendar_meta().get("disabled_reason") and not macro_events:
+        degraded_reasons.add("macro_calendar_unavailable")
 
     technical_analyzer = TechnicalAnalyzer(spy_data=spy_data)
     technical_results: dict[str, TechnicalProfile] = {}
@@ -811,10 +891,21 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
             "news_semantic": semantic_tagger.get_semantic_meta(ticker),
             "spy_history": spy_history_meta,
         }
+        news_data = sentiment_analyzer.analyze_articles(news_by_ticker.get(ticker, []))
+        company_news_meta = feature_source_meta["company_news"]
+        if company_news_meta.get("retrieval_mode") == "skipped":
+            news_data["status"] = "skipped"
+            news_data["unavailable_reason"] = company_news_meta.get("disabled_reason", "budget_control")
+        elif company_news_meta.get("retrieval_mode") == "cache_fallback" and company_news_meta.get("disabled_reason"):
+            news_data["status"] = "stale"
+            news_data["unavailable_reason"] = company_news_meta.get("disabled_reason", "request_failed")
+        elif company_news_meta.get("disabled_reason"):
+            news_data["status"] = "unavailable"
+            news_data["unavailable_reason"] = company_news_meta.get("disabled_reason", "source_unavailable")
         feature = assembler.build(
             technical=profile,
             premarket_data=premarket_data.get(ticker),
-            news_data=sentiment_analyzer.analyze_articles(news_by_ticker.get(ticker, [])),
+            news_data=news_data,
             news_sentiment_data=provider_news_sentiments.get(ticker),
             news_semantic_data=semantic_by_ticker.get(ticker),
             news_articles=news_by_ticker.get(ticker, []),
@@ -930,10 +1021,12 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         triage_ref = artifact_store.write_json(f"symbols/{ticker}/llm/triage.json", triage_output)
         triage_outputs[ticker] = triage_output
         verdict = str(triage_output.get("triage_verdict") or "reject").lower()
+        if verdict == "unavailable":
+            degraded_reasons.add("triage_llm_unavailable")
         traces[ticker].add_stage(
             stage="compact_triage_llm",
-            gate_type="llm_judgment",
-            decision="pass" if verdict in {"keep", "observe"} else "reject",
+            gate_type="llm_judgment" if verdict != "unavailable" else "system_gate",
+            decision="pass" if verdict in {"keep", "observe"} else "skip" if verdict == "unavailable" else "reject",
             reason_codes=list(triage_output.get("why_keep") or triage_output.get("why_reject") or ["no_reason"]),
             artifacts={"input_ref": compact_ref, "summary_ref": candidate_set_ref},
             llm_output_ref=triage_ref,
@@ -1004,10 +1097,21 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
             sector_context=sector_context,
             macro_events=macro_events,
         )
+        deep_news_meta = news_collector.get_company_news_meta(ticker)
+        deep_news_data = sentiment_analyzer.analyze_articles(news_by_ticker.get(ticker, []))
+        if deep_news_meta.get("retrieval_mode") == "skipped":
+            deep_news_data["status"] = "skipped"
+            deep_news_data["unavailable_reason"] = deep_news_meta.get("disabled_reason", "budget_control")
+        elif deep_news_meta.get("retrieval_mode") == "cache_fallback" and deep_news_meta.get("disabled_reason"):
+            deep_news_data["status"] = "stale"
+            deep_news_data["unavailable_reason"] = deep_news_meta.get("disabled_reason", "request_failed")
+        elif deep_news_meta.get("disabled_reason"):
+            deep_news_data["status"] = "unavailable"
+            deep_news_data["unavailable_reason"] = deep_news_meta.get("disabled_reason", "source_unavailable")
         rebuilt = assembler.build(
             technical=technical_results[ticker],
             premarket_data=premarket_data.get(ticker),
-            news_data=sentiment_analyzer.analyze_articles(news_by_ticker.get(ticker, [])),
+            news_data=deep_news_data,
             news_sentiment_data=provider_news_sentiments.get(ticker),
             news_semantic_data=semantic_by_ticker.get(ticker),
             news_articles=news_by_ticker.get(ticker, []),
@@ -1069,6 +1173,21 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         )
         artifact_store.write_json(f"symbols/{ticker}/llm/deep_analysis_request.json", request_payload)
         deep_ref = artifact_store.write_json(f"symbols/{ticker}/llm/deep_analysis.json", deep_output)
+        if deep_output.get("analysis_status") == "unavailable":
+            degraded_reasons.add("deep_analysis_llm_unavailable")
+            traces[ticker].add_stage(
+                stage="deep_analysis_llm",
+                gate_type="system_gate",
+                decision="skip",
+                reason_codes=[deep_output.get("unavailable_reason") or "live_llm_unavailable"],
+                artifacts={
+                    "input_ref": dossier_ref,
+                    "summary_ref": raw_events_ref,
+                },
+                llm_output_ref=deep_ref,
+                as_of=session.run_at_market_tz,
+            )
+            continue
         deep_outputs[ticker] = deep_output
         deep_artifacts_by_ticker[ticker] = {
             "dossier_ref": dossier_ref,
@@ -1116,16 +1235,32 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
     )
     artifact_store.write_json("judge/final_selection_request.json", final_selection_request)
     final_selection_ref = artifact_store.write_json("judge/final_selection.json", final_selection)
+    final_judge_unavailable = final_selection.get("execution_mode") != "live_llm"
+    if final_judge_unavailable:
+        degraded_reasons.add("final_judge_unavailable")
 
     selected_tickers = list(final_selection.get("final_top_n") or [])
     ranked_candidates = final_selection.get("ranked_candidates") or []
     decision_by_ticker = {item.get("ticker"): item for item in ranked_candidates if item.get("ticker")}
     for ticker in triage_tickers:
         if ticker not in deep_outputs:
-            traces[ticker].final_status = "triage_rejected"
+            verdict = str((triage_outputs.get(ticker) or {}).get("triage_verdict") or "").lower()
+            traces[ticker].final_status = "analysis_unavailable" if verdict == "unavailable" else "triage_rejected"
             continue
         if ticker in skipped_judge_candidates:
             traces[ticker].final_status = "judge_rejected"
+            continue
+        if final_judge_unavailable:
+            traces[ticker].add_stage(
+                stage="cross_stock_judge",
+                gate_type="system_gate",
+                decision="skip",
+                reason_codes=[final_selection.get("unavailable_reason") or "live_llm_unavailable"],
+                artifacts={"summary_ref": final_selection_ref},
+                llm_output_ref=final_selection_ref,
+                as_of=session.run_at_market_tz,
+            )
+            traces[ticker].final_status = "analysis_unavailable"
             continue
         selected = ticker in selected_tickers
         judge_item = decision_by_ticker.get(ticker, {})
@@ -1145,22 +1280,25 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
             last_decision = traces[ticker].stages[-1].decision if traces[ticker].stages else "pending"
             if last_decision == "reject":
                 traces[ticker].final_status = "system_rejected"
+            elif last_decision == "skip":
+                traces[ticker].final_status = "analysis_unavailable"
             else:
                 traces[ticker].final_status = "observed"
         _write_trace(artifact_store, ticker, traces[ticker])
 
     selected_features_lookup = {feature.ticker: feature for feature in enriched_features if feature.ticker in selected_tickers}
     selected_features = [selected_features_lookup[ticker] for ticker in selected_tickers if ticker in selected_features_lookup]
-    if not selected_features:
-        selected_features = enriched_features[: int(config.BUDGET_CONFIG["final_selection_count"])]
-
-    report = format_console_report(selected_features, market_summary)
+    report_context = {
+        "selection_origin": final_selection.get("execution_mode") or "unknown",
+        "degraded_reasons": sorted(degraded_reasons),
+    }
+    report = format_console_report(selected_features, market_summary, report_context=report_context)
     print("\n" + report)
     _save_legacy_outputs(config.SYSTEM["output_dir"], selected_features, report)
 
     if not dry_run and selected_features:
         notifier = DiscordNotifier()
-        notifier.send_stock_pool(selected_features, market_summary)
+        notifier.send_stock_pool(selected_features, market_summary, report_context=report_context)
     else:
         logger.info("Skipping Discord push (dry-run or no selected features)")
 
@@ -1191,6 +1329,8 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         "triage_ticker_count": len(triage_tickers),
         "deep_analysis_ticker_count": len(deep_tickers),
         "selected_ticker_count": len(selected_tickers),
+        "selection_execution_mode": final_selection.get("execution_mode") or "unknown",
+        "degraded_reasons": sorted(degraded_reasons),
         "artifacts": {
             "session_context": "session_context.json",
             "registry_snapshot": registry_snapshot_ref,

@@ -110,7 +110,19 @@ def normalize_history_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
 
     frame = frame.dropna(how="all")
     if not isinstance(frame.index, pd.DatetimeIndex):
-        frame.index = pd.to_datetime(frame.index)
+        date_column = next(
+            (
+                column
+                for column in ("Date", "date", "Datetime", "datetime", "timestamp")
+                if column in frame.columns
+            ),
+            None,
+        )
+        if date_column:
+            frame[date_column] = pd.to_datetime(frame[date_column])
+            frame = frame.set_index(date_column)
+        else:
+            frame.index = pd.to_datetime(frame.index)
     frame = frame.sort_index()
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_convert(None)

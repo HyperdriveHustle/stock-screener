@@ -460,6 +460,7 @@ class NewsSentimentAnalyzer:
 
         Returns:
             {
+                status: "available" / "no_articles" / "unavailable",
                 score: 0-100,
                 sentiment: "bullish" / "bearish" / "neutral",
                 article_count: int,
@@ -470,8 +471,9 @@ class NewsSentimentAnalyzer:
         """
         if not articles:
             return {
-                "score": 50,
-                "sentiment": "neutral",
+                "status": "no_articles",
+                "score": None,
+                "sentiment": None,
                 "article_count": 0,
                 "top_headline": "",
                 "bullish_count": 0,
@@ -521,6 +523,7 @@ class NewsSentimentAnalyzer:
         top_headline = articles[0].get("headline", "") if articles else ""
 
         return {
+            "status": "available",
             "score": score,
             "sentiment": sentiment,
             "article_count": total_articles,

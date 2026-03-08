@@ -58,6 +58,9 @@ def _normalize_impact(v: Any) -> str:
     return _IMPACT_MAP.get(key, "medium")
 
 
+_RELEVANCE_THRESHOLD = 0.4  # articles below this are filtered out
+
+
 def _normalize_semantic_payload(payload: dict) -> dict:
     evidence = payload.get("evidence")
     if isinstance(evidence, str):
@@ -77,6 +80,7 @@ def _normalize_semantic_payload(payload: dict) -> dict:
         "sentiment": _normalize_sentiment(payload.get("sentiment")),
         "impact": _normalize_impact(payload.get("impact")),
         "confidence": _clamp_float(payload.get("confidence"), 0.0, 1.0, 0.5),
+        "relevance": _clamp_float(payload.get("relevance"), 0.0, 1.0, 0.5),
         "evidence": evidence_list[:3],
         "reasoning": str(reasoning or "")[:500],
     }
@@ -120,6 +124,7 @@ def _keyword_fallback(article: dict, reason: str) -> dict:
         "sentiment": sentiment,
         "impact": impact,
         "confidence": 0.35,
+        "relevance": 0.5,
         "evidence": evidence,
         "reasoning": f"keyword fallback: {reason}",
         "provider": "keyword_fallback",
@@ -129,17 +134,23 @@ def _keyword_fallback(article: dict, reason: str) -> dict:
     }
 
 
-def _build_rollup(items: list[dict]) -> dict:
+def _build_rollup(items: list[dict], relevance_threshold: float = _RELEVANCE_THRESHOLD) -> dict:
     sentiment_counts = {"bullish": 0, "neutral": 0, "bearish": 0}
     impact_counts = {"high": 0, "medium": 0, "low": 0}
     score_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
     impact_weight = {"high": 3.0, "medium": 2.0, "low": 1.0}
 
+    filtered_out = 0
     weighted_sum = 0.0
     total_weight = 0.0
     confidence_sum = 0.0
 
     for item in items:
+        relevance = _clamp_float(item.get("relevance"), 0.0, 1.0, 0.5)
+        if relevance < relevance_threshold:
+            filtered_out += 1
+            continue
+
         sentiment = _normalize_sentiment(item.get("sentiment"))
         impact = _normalize_impact(item.get("impact"))
         confidence = _clamp_float(item.get("confidence"), 0.0, 1.0, 0.5)
@@ -147,12 +158,12 @@ def _build_rollup(items: list[dict]) -> dict:
         sentiment_counts[sentiment] += 1
         impact_counts[impact] += 1
 
-        weight = impact_weight[impact] * max(confidence, 0.05)
+        weight = impact_weight[impact] * max(confidence, 0.05) * relevance
         weighted_sum += score_map[sentiment] * weight
         total_weight += weight
         confidence_sum += confidence
 
-    article_count = len(items)
+    article_count = len(items) - filtered_out
     avg_confidence = (confidence_sum / article_count) if article_count > 0 else None
     weighted_score = None
     if total_weight > 0:
@@ -175,6 +186,7 @@ def _build_rollup(items: list[dict]) -> dict:
 
     return {
         "article_count": article_count,
+        "filtered_low_relevance": filtered_out,
         "sentiment_counts": sentiment_counts,
         "impact_counts": impact_counts,
         "average_confidence": avg_confidence,
@@ -198,7 +210,10 @@ class MiniMaxSemanticProvider:
             "You are a disciplined US equities news analyst. "
             "Return strict JSON only, no markdown. "
             "Schema: sentiment(bullish|neutral|bearish), impact(low|medium|high), "
-            "confidence(0~1), evidence(array of <=3 short strings), reasoning(short string)."
+            "confidence(0~1), relevance(0~1, how directly this article relates to the ticker - "
+            "1.0=directly about the company, 0.7=about direct competitors/suppliers, "
+            "0.4=about the sector broadly, 0.1=mentions ticker but unrelated, 0.0=completely unrelated), "
+            "evidence(array of <=3 short strings), reasoning(short string)."
         )
 
         user_payload = {
@@ -333,6 +348,7 @@ class SemanticNewsTagger:
             "cache_miss_count": int(mode_counts.get("cache_miss", 0)),
             "network_refresh_count": int(mode_counts.get("network_refresh", 0)),
             "cache_fallback_count": int(mode_counts.get("cache_fallback", 0)),
+            "heuristic_only": retrieval_mode == "heuristic_only",
             "disabled_reason": reason,
         }
 
@@ -371,6 +387,7 @@ class SemanticNewsTagger:
             return {"by_fingerprint": {}, "rollup": _build_rollup([])}
 
         by_fingerprint: dict[str, dict] = {}
+        heuristic_by_fingerprint: dict[str, dict] = {}
         mode_counts = {
             "cache_hit": 0,
             "cache_miss": 0,
@@ -384,6 +401,14 @@ class SemanticNewsTagger:
             cached = self.cache.get(cache_key)
             if isinstance(cached, dict) and cached:
                 item = dict(cached)
+                is_heuristic = bool(item.get("heuristic_only")) or str(item.get("provider") or "").lower() == "keyword_fallback"
+                if is_heuristic:
+                    item["heuristic_only"] = True
+                    item["retrieval_mode"] = "cache_fallback"
+                    heuristic_by_fingerprint[fingerprint] = item
+                    mode_counts["cache_fallback"] += 1
+                    self.cache_stats["semantic_fallback"] += 1
+                    continue
                 item["retrieval_mode"] = "cache_hit"
                 by_fingerprint[fingerprint] = item
                 mode_counts["cache_hit"] += 1
@@ -421,6 +446,11 @@ class SemanticNewsTagger:
             semantic["article_fingerprint"] = fingerprint
             semantic["retrieval_mode"] = retrieval_mode
             semantic["tagged_at"] = datetime.utcnow().isoformat()
+            semantic["heuristic_only"] = retrieval_mode == "cache_fallback"
+
+            if retrieval_mode == "cache_fallback":
+                heuristic_by_fingerprint[fingerprint] = semantic
+                continue
 
             self.cache.set(
                 key=cache_key,
@@ -434,10 +464,14 @@ class SemanticNewsTagger:
             by_fingerprint[fingerprint] = semantic
 
         rollup = _build_rollup(list(by_fingerprint.values()))
+        heuristic_rollup = _build_rollup(list(heuristic_by_fingerprint.values()))
         retrieval_mode = self._pick_retrieval_mode(mode_counts, article_count=len(selected))
         reason = ""
         if self.provider is None:
             reason = "missing_provider_api_key"
+        if not by_fingerprint and heuristic_by_fingerprint:
+            retrieval_mode = "heuristic_only"
+            reason = "live_provider_unavailable"
 
         self.semantic_meta[ticker] = self._build_meta(
             ticker,
@@ -449,6 +483,8 @@ class SemanticNewsTagger:
         return {
             "by_fingerprint": by_fingerprint,
             "rollup": rollup,
+            "heuristic_by_fingerprint": heuristic_by_fingerprint,
+            "heuristic_rollup": heuristic_rollup,
         }
 
     def get_semantic_meta(self, ticker: str) -> dict:

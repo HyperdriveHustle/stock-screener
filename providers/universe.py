@@ -9,18 +9,34 @@ from runtime import config
 logger = logging.getLogger(__name__)
 
 FALLBACK_TICKERS = [
-    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK-B",
-    "UNH", "XOM", "JNJ", "JPM", "V", "PG", "MA", "AVGO", "HD", "CVX",
-    "MRK", "ABBV", "LLY", "COST", "PEP", "KO", "ADBE", "WMT", "MCD",
-    "CRM", "CSCO", "ACN", "TMO", "ABT", "NFLX", "DHR", "LIN", "AMD",
-    "CMCSA", "VZ", "NKE", "TXN", "PM", "NEE", "UNP", "RTX", "INTC",
-    "BMY", "QCOM", "HON", "LOW", "AMGN", "UPS", "SBUX", "BA", "CAT",
-    "GS", "ELV", "BLK", "SPGI", "DE", "ISRG", "GILD", "MDLZ", "ADP",
-    "AMAT", "ADI", "SYK", "BKNG", "VRTX", "MMC", "LRCX", "REGN",
-    "CI", "NOW", "MU", "PANW", "SNPS", "CDNS", "KLAC", "MRVL",
-    "CRWD", "FTNT", "ABNB", "DASH", "COIN", "PLTR", "SQ", "SHOP",
-    "SNOW", "NET", "DDOG", "ZS", "OKTA", "MELI", "SE", "UBER",
-    "LYFT", "RIVN", "LCID", "SOFI", "ARM", "SMCI", "IONQ",
+    # --- Technology / Software (12) ---
+    "AAPL", "MSFT", "GOOGL", "META", "ADBE", "CRM", "NOW", "CSCO", "ACN", "ORCL",
+    "PANW", "CRWD",
+    # --- Semiconductors (8) ---
+    "NVDA", "AVGO", "AMD", "QCOM", "TXN", "AMAT", "LRCX", "MU",
+    # --- Consumer Discretionary (8) ---
+    "AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "BKNG", "TJX",
+    # --- Consumer Staples (6) ---
+    "WMT", "PG", "KO", "PEP", "COST", "PM",
+    # --- Healthcare / Pharma (10) ---
+    "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "AMGN", "VRTX", "ISRG",
+    # --- Financials (8) ---
+    "JPM", "V", "MA", "GS", "BLK", "SPGI", "BRK-B", "MMC",
+    # --- Industrials (8) ---
+    "CAT", "HON", "UNP", "RTX", "DE", "BA", "UPS", "GE",
+    # --- Energy (5) ---
+    "XOM", "CVX", "COP", "SLB", "EOG",
+    # --- Utilities (4) ---
+    "NEE", "DUK", "SO", "AEP",
+    # --- Real Estate (4) ---
+    "PLD", "AMT", "EQIX", "SPG",
+    # --- Materials (5) ---
+    "LIN", "APD", "SHW", "FCX", "NEM",
+    # --- Communication Services (5) ---
+    "NFLX", "DIS", "CMCSA", "T", "VZ",
+    # --- High-Growth / Speculative (12) ---
+    "PLTR", "COIN", "SQ", "SHOP", "SNOW", "DDOG", "ARM", "SMCI",
+    "ABNB", "DASH", "UBER", "MELI",
 ]
 
 

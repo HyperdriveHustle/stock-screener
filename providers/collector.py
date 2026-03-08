@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -48,6 +49,8 @@ def _build_retrieval_meta(
         meta["data_type"] = data_type
     meta["retrieval_mode"] = retrieval_mode
     return meta
+
+
 def _parse_expiry_date(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
@@ -56,6 +59,24 @@ def _parse_expiry_date(value: Any) -> date | None:
         return datetime.fromisoformat(text).date()
     except Exception:
         return None
+
+
+def _latest_expected_history_day(now_utc: datetime | None = None) -> date:
+    now_utc = now_utc or datetime.utcnow()
+    now_et = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("America/New_York"))
+    expected = now_et.date()
+    if now_et.weekday() >= 5:
+        expected -= timedelta(days=now_et.weekday() - 4)
+    elif now_et.hour < 17:
+        expected -= timedelta(days=1)
+
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    return expected
+
+
+def _history_cache_is_fresh(last_date: datetime, now_utc: datetime | None = None) -> bool:
+    return last_date.date() >= _latest_expected_history_day(now_utc=now_utc)
 
 
 class MarketDataCollector:
@@ -204,8 +225,8 @@ class MarketDataCollector:
             self.cache_stats["history_hit"] += 1
 
             last_date = cached_df.index[-1].to_pydatetime()
-            # 当缓存是最近 1 天时, 直接复用缓存
-            if (end_date.date() - last_date.date()).days <= 1:
+            # 仅当缓存覆盖到预期的最新交易日时才直接复用
+            if _history_cache_is_fresh(last_date, now_utc=end_date):
                 all_data[ticker] = cached_df
                 self.history_meta[ticker] = _build_retrieval_meta(
                     cache_meta,
@@ -503,7 +524,12 @@ class NewsCollector:
         return f"economic_calendar:{from_date}:{to_date}"
 
     @staticmethod
-    def _build_disabled_meta(symbol: str, data_type: str, reason: str) -> dict:
+    def _build_disabled_meta(
+        symbol: str,
+        data_type: str,
+        reason: str,
+        retrieval_mode: str = "unavailable",
+    ) -> dict:
         now_iso = _ensure_utc_timestamp(datetime.utcnow())
         return {
             "source": "finnhub",
@@ -512,9 +538,27 @@ class NewsCollector:
             "as_of": now_iso,
             "fetched_at": now_iso,
             "expires_at": "",
-            "retrieval_mode": "cache_miss",
+            "retrieval_mode": retrieval_mode,
             "disabled_reason": reason,
         }
+
+    def _build_request_failure_meta(
+        self,
+        *,
+        symbol: str,
+        data_type: str,
+        cache_meta: dict | None,
+        stale_fallback_used: bool,
+    ) -> dict:
+        meta = _build_retrieval_meta(
+            cache_meta,
+            "cache_fallback" if stale_fallback_used else "unavailable",
+            source="finnhub",
+            symbol=symbol,
+            data_type=data_type,
+        )
+        meta["disabled_reason"] = "request_failed"
+        return meta
 
     def _rate_limit_wait(self):
         """简单的速率限制"""
@@ -566,6 +610,7 @@ class NewsCollector:
         to_date = now.strftime("%Y-%m-%d")
         cache_key = self._company_news_cache_key(ticker, from_date, to_date)
         cache_meta = self.cache.get_meta(cache_key)
+        stale_data = self.cache.get_stale(cache_key)
 
         data = self.cache.get(cache_key)
         if isinstance(data, list):
@@ -591,6 +636,16 @@ class NewsCollector:
                 "from": from_date,
                 "to": to_date,
             })
+            if data is None:
+                stale_fallback = stale_data if isinstance(stale_data, list) and stale_data else []
+                self.company_news_meta[ticker] = self._build_request_failure_meta(
+                    symbol=ticker,
+                    data_type="company_news",
+                    cache_meta=cache_meta,
+                    stale_fallback_used=bool(stale_fallback),
+                )
+                return stale_fallback
+
             if not data:
                 data = []
             data = sorted(data, key=lambda x: x.get("datetime", 0), reverse=True)
@@ -677,6 +732,7 @@ class NewsCollector:
 
         cache_key = self._market_news_cache_key(category)
         cache_meta = self.cache.get_meta(cache_key)
+        stale_cached = self.cache.get_stale(cache_key)
         cached = self.cache.get(cache_key)
         if isinstance(cached, list):
             self.cache_stats["market_news_hit"] += 1
@@ -690,6 +746,17 @@ class NewsCollector:
             return cached
 
         self.cache_stats["market_news_miss"] += 1
+        data = self._get("news", {"category": category})
+        if data is None:
+            stale_fallback = stale_cached if isinstance(stale_cached, list) and stale_cached else []
+            self.market_news_meta[category] = self._build_request_failure_meta(
+                symbol="MARKET",
+                data_type=f"market_news:{category}",
+                cache_meta=cache_meta,
+                stale_fallback_used=bool(stale_fallback),
+            )
+            return stale_fallback
+
         self.market_news_meta[category] = _build_retrieval_meta(
             cache_meta,
             "cache_miss",
@@ -697,7 +764,6 @@ class NewsCollector:
             symbol="MARKET",
             data_type=f"market_news:{category}",
         )
-        data = self._get("news", {"category": category})
         news = data if isinstance(data, list) else []
         self.cache.set(
             key=cache_key,
@@ -761,6 +827,7 @@ class NewsCollector:
 
         cache_key = self._news_sentiment_cache_key(ticker)
         cache_meta = self.cache.get_meta(cache_key)
+        stale_cached = self.cache.get_stale(cache_key)
         cached = self.cache.get(cache_key)
         if isinstance(cached, dict):
             self.cache_stats["news_sentiment_hit"] += 1
@@ -782,6 +849,16 @@ class NewsCollector:
             data_type="news_sentiment",
         )
         data = self._get("news-sentiment", {"symbol": ticker})
+        if data is None:
+            stale_fallback = stale_cached if isinstance(stale_cached, dict) and stale_cached else {}
+            self.news_sentiment_meta[ticker] = self._build_request_failure_meta(
+                symbol=ticker,
+                data_type="news_sentiment",
+                cache_meta=cache_meta,
+                stale_fallback_used=bool(stale_fallback),
+            )
+            return stale_fallback
+
         payload = data if isinstance(data, dict) else {}
         self.cache.set(
             key=cache_key,
@@ -830,6 +907,7 @@ class NewsCollector:
         to_date = (now + timedelta(days=max(1, horizon_days))).strftime("%Y-%m-%d")
         cache_key = self._economic_calendar_cache_key(from_date, to_date)
         cache_meta = self.cache.get_meta(cache_key)
+        stale_cached = self.cache.get_stale(cache_key)
         cached = self.cache.get(cache_key)
         if isinstance(cached, list):
             self.cache_stats["economic_calendar_hit"] += 1
@@ -857,6 +935,16 @@ class NewsCollector:
                 "to": to_date,
             },
         )
+        if data is None:
+            stale_fallback = stale_cached if isinstance(stale_cached, list) and stale_cached else []
+            self.economic_calendar_meta["macro"] = self._build_request_failure_meta(
+                symbol="MACRO",
+                data_type="economic_calendar",
+                cache_meta=cache_meta,
+                stale_fallback_used=bool(stale_fallback),
+            )
+            return stale_fallback[: int(config.EVENTS["max_macro_events"])]
+
         events = self._normalize_economic_calendar(data)
         self.cache.set(
             key=cache_key,

@@ -2,29 +2,71 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 import requests
 
 from runtime import config
 from runtime.utils import first_json_object as _first_json_object
-from runtime.utils import safe_float as _safe_float
 
 logger = logging.getLogger(__name__)
 
 
+def _market_date_from_session(session_payload: dict | None) -> date | None:
+    session = dict(session_payload or {})
+    market_date = str(session.get("market_date") or "").strip()
+    if market_date:
+        try:
+            return datetime.fromisoformat(market_date).date()
+        except Exception:
+            pass
+
+    market_tz = ZoneInfo(config.SESSION_CONFIG["market_timezone"])
+    return datetime.now(market_tz).date()
+
+
+def _recalc_days_to_expiry(nearest_expiry: str | None, session_payload: dict | None) -> int | None:
+    """Recalculate option expiry off the session's market date, not local machine date."""
+    if not nearest_expiry:
+        return None
+    try:
+        expiry_date = datetime.fromisoformat(nearest_expiry).date()
+        market_date = _market_date_from_session(session_payload)
+        if market_date is None:
+            return None
+        return max(0, (expiry_date - market_date).days)
+    except Exception:
+        return None
+
+
+_NEWS_RELEVANCE_THRESHOLD = 0.4
+
+
 def _compact_news_items(items: list[dict], limit: int = 5) -> list[dict]:
     compact = []
-    for item in (items or [])[:limit]:
-        compact.append(
-            {
-                "datetime": item.get("datetime"),
-                "headline": item.get("headline", ""),
-                "summary": str(item.get("summary", ""))[:400],
-                "source": item.get("source", ""),
-                "url": item.get("url", ""),
+    for item in (items or []):
+        if len(compact) >= limit:
+            break
+        semantic = item.get("semantic")
+        if isinstance(semantic, dict) and semantic:
+            relevance = semantic.get("relevance")
+            if isinstance(relevance, (int, float)) and relevance < _NEWS_RELEVANCE_THRESHOLD:
+                continue
+        entry = {
+            "datetime": item.get("datetime"),
+            "headline": item.get("headline", ""),
+            "summary": str(item.get("summary", ""))[:400],
+            "source": item.get("source", ""),
+        }
+        if isinstance(semantic, dict) and semantic:
+            entry["semantic"] = {
+                "sentiment": semantic.get("sentiment"),
+                "impact": semantic.get("impact"),
+                "confidence": semantic.get("confidence"),
+                "relevance": semantic.get("relevance"),
             }
-        )
+        compact.append(entry)
     return compact
 
 
@@ -74,10 +116,14 @@ def _prepare_deep_payload(full_dossier: dict) -> dict:
                 "as_of": options_block.get("as_of"),
                 "aggregate": options_block.get("aggregate") or {},
                 "nearest_expiry": options_block.get("nearest_expiry"),
-                "days_to_nearest_expiry": options_block.get("days_to_nearest_expiry"),
+                "days_to_nearest_expiry": _recalc_days_to_expiry(
+                    options_block.get("nearest_expiry"),
+                    full_dossier.get("session"),
+                ),
                 "expiries": list((options_block.get("expiries") or [])[:3]),
                 "unusual_contracts": list((options_block.get("unusual_contracts") or [])[:5]),
             },
+            "ohlc_recent_20d": list((stock_context.get("ohlc_recent") or [])[-20:]),
             "sector_context": sector_block,
             "upcoming_events": events_block,
             "data_quality": full_dossier.get("data_quality") or {},
@@ -153,9 +199,9 @@ class StructuredLLMRunner:
             parsed = _first_json_object(content)
             if isinstance(parsed, dict):
                 return request_payload, parsed
-            logger.warning("LLM 返回无法解析为 JSON，回退 fallback proxy")
+            logger.warning("LLM 返回无法解析为 JSON，返回 unavailable")
         except Exception as exc:
-            logger.warning("LLM 调用失败，回退 fallback proxy: %s", exc)
+            logger.warning("LLM 调用失败，返回 unavailable: %s", exc)
         return request_payload, {}
 
     def triage(self, market_context_compact: dict, compact_card: dict) -> tuple[dict, dict]:
@@ -179,7 +225,7 @@ class StructuredLLMRunner:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["triage"])
             response_payload.setdefault("execution_mode", "live_llm")
             return request_payload, response_payload
-        return request_payload, self._fallback_triage(compact_card)
+        return request_payload, self._unavailable_triage()
 
     def deep_analysis(
         self,
@@ -205,7 +251,7 @@ class StructuredLLMRunner:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["deep_analysis"])
             response_payload.setdefault("execution_mode", "live_llm")
             return request_payload, response_payload
-        return request_payload, self._fallback_deep_analysis(full_dossier)
+        return request_payload, self._unavailable_deep_analysis()
 
     def final_judge(
         self,
@@ -233,108 +279,49 @@ class StructuredLLMRunner:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["portfolio_judge"])
             response_payload.setdefault("execution_mode", "live_llm")
             return request_payload, response_payload
-        return request_payload, self._fallback_final_judge(deep_analysis_by_ticker, selection_count)
+        return request_payload, self._unavailable_final_judge(selection_count)
 
-    def _fallback_triage(self, compact_card: dict) -> dict:
-        summary = compact_card.get("derived", {})
-        generator_summary = summary.get("generator_summary") or {}
-        score = int(generator_summary.get("triggered_count") or 0)
-        data_quality = _safe_float(
-            ((compact_card.get("compact_summary") or {}).get("coverage") or {}).get("overall_coverage"),
-            0.0,
-        )
-        strong_gap = abs(_safe_float((summary.get("premarket") or {}).get("premarket_change_pct"), 0.0))
-        news_count = int((summary.get("attention") or {}).get("news_article_count") or 0)
-
-        verdict = "reject"
-        if score >= 3 or strong_gap >= config.PREMARKET["gap_strong_threshold"]:
-            verdict = "keep"
-        elif score >= 1 or news_count >= 2:
-            verdict = "observe"
-
+    def _unavailable_triage(self) -> dict:
         return {
             "schema_version": config.PIPELINE_CONFIG["schema_versions"]["triage"],
-            "execution_mode": "fallback_proxy",
+            "execution_mode": "unavailable",
             "generated_at": datetime.utcnow().isoformat(),
-            "triage_verdict": verdict,
-            "triage_confidence": round(min(0.8, 0.25 + score * 0.12 + data_quality * 0.2), 3),
-            "why_keep": list(generator_summary.get("triggered_generators") or []),
-            "why_reject": [] if verdict != "reject" else ["insufficient_recall_signals"],
-            "missing_info_requests": [] if data_quality >= 0.5 else ["improve_data_quality"],
-            "risk_flags": list(generator_summary.get("risk_flags") or []),
+            "triage_verdict": "unavailable",
+            "triage_confidence": None,
+            "why_keep": [],
+            "why_reject": ["live_llm_unavailable"],
+            "missing_info_requests": ["live_llm_required_for_triage"],
+            "risk_flags": [],
+            "unavailable_reason": "live_llm_unavailable",
         }
 
-    def _fallback_deep_analysis(self, full_dossier: dict) -> dict:
-        stock_context = ((full_dossier.get("derived") or {}).get("stock_context") or {})
-        generator_summary = ((full_dossier.get("derived") or {}).get("generator_summary") or {})
-        support_resistance = stock_context.get("support_resistance") or {}
-        setup_type = "event_driven"
-        if "price_action_generator" in (generator_summary.get("triggered_generators") or []):
-            setup_type = "price_action"
-        elif "premarket_dislocation_generator" in (generator_summary.get("triggered_generators") or []):
-            setup_type = "premarket_dislocation"
-
+    def _unavailable_deep_analysis(self) -> dict:
         return {
             "schema_version": config.PIPELINE_CONFIG["schema_versions"]["deep_analysis"],
-            "execution_mode": "fallback_proxy",
+            "execution_mode": "unavailable",
             "generated_at": datetime.utcnow().isoformat(),
-            "setup_type": setup_type,
-            "bull_case": list(generator_summary.get("triggered_generators") or []),
-            "bear_case": list(generator_summary.get("risk_flags") or []),
-            "trigger": {
-                "type": "evidence_follow_through",
-                "note": "Fallback proxy uses generator evidence instead of live LLM reasoning.",
-            },
-            "invalidation": {
-                "nearest_support": support_resistance.get("nearest_support"),
-                "note": "Review if catalyst or price follow-through fails.",
-            },
-            "holding_window": config.LLM["analysis_horizon"],
-            "execution_notes": [
-                "fallback_proxy_active",
-                "replace_with_live_llm_for_directional judgment",
-            ],
-            "confidence": round(
-                min(0.75, 0.3 + 0.1 * int(generator_summary.get("triggered_count") or 0)),
-                3,
-            ),
+            "analysis_status": "unavailable",
+            "setup_type": None,
+            "bull_case": [],
+            "bear_case": [],
+            "trigger": None,
+            "invalidation": None,
+            "holding_window": None,
+            "execution_notes": ["live_llm_required_for_deep_analysis"],
+            "confidence": None,
+            "unavailable_reason": "live_llm_unavailable",
         }
 
-    def _fallback_final_judge(
-        self,
-        deep_analysis_by_ticker: dict[str, dict],
-        selection_count: int,
-    ) -> dict:
-        ranked = sorted(
-            deep_analysis_by_ticker.items(),
-            key=lambda item: _safe_float(item[1].get("confidence"), 0.0),
-            reverse=True,
-        )
-        ranked_candidates = []
-        final_top_n = []
-        for idx, (ticker, payload) in enumerate(ranked, start=1):
-            selected = idx <= selection_count
-            if selected:
-                final_top_n.append(ticker)
-            ranked_candidates.append(
-                {
-                    "ticker": ticker,
-                    "final_rank": idx,
-                    "selection_reason": "highest_available_proxy_confidence" if selected else "",
-                    "rejection_reason": "" if selected else "ranked_below_selection_cutoff",
-                    "portfolio_overlap_flags": [],
-                    "confidence": payload.get("confidence"),
-                }
-            )
-
+    def _unavailable_final_judge(self, selection_count: int) -> dict:
         return {
             "schema_version": config.PIPELINE_CONFIG["schema_versions"]["portfolio_judge"],
-            "execution_mode": "fallback_proxy",
+            "execution_mode": "unavailable",
             "generated_at": datetime.utcnow().isoformat(),
-            "final_top_n": final_top_n,
-            "ranked_candidates": ranked_candidates,
+            "final_top_n": [],
+            "ranked_candidates": [],
+            "unavailable_reason": "live_llm_unavailable",
             "summary": {
-                "note": "Fallback proxy active. Replace with live LLM for production-quality cross-stock judgment.",
+                "note": "Cross-stock judge unavailable. No final recommendations were produced.",
                 "selection_count": selection_count,
             },
         }

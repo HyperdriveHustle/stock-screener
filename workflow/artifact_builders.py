@@ -77,6 +77,10 @@ def build_market_context_compact(market_context: dict, features: list[StockFeatu
             "sample_size": total,
             "usable_as_market_breadth": breadth_usable,
             "minimum_sample_size_required": min_sample,
+            "warning": None if breadth_usable else (
+                f"Sample size ({total}) is below minimum ({min_sample}). "
+                "These ratios are NOT representative of market-wide breadth. Do NOT use them for regime analysis."
+            ),
             "advancers_ratio": round(advancers / total, 3) if total and breadth_usable else None,
             "above_ma20_ratio": round(above_ma20 / total, 3) if total and breadth_usable else None,
             "above_ma50_ratio": round(above_ma50 / total, 3) if total and breadth_usable else None,
@@ -170,6 +174,14 @@ def build_compact_card(
                 ),
                 "latest_news_timestamp": latest_news[0].get("datetime") if latest_news else None,
                 "company_event_count": len(company_events),
+            },
+            "analyst_signal": {
+                "upside_to_target_pct": _safe_float(
+                    (feature.valuation_consistency or {}).get("upside_to_analyst_target_mean_pct")
+                ),
+                "target_mean_price": _safe_float((feature.analyst or {}).get("target_mean_price")),
+                "recommendation_key": (feature.analyst or {}).get("recommendation_key"),
+                "analyst_count": (feature.analyst or {}).get("number_of_analyst_opinions"),
             },
             "generator_summary": dict(generator_summary),
         },

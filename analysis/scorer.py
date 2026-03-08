@@ -746,8 +746,10 @@ class FeatureAssembler:
             compact_articles.append(compact)
 
         result.news = {
-            "sentiment_score": (news_data or {}).get("score", 50),
-            "sentiment_label": (news_data or {}).get("sentiment", "neutral"),
+            "status": (news_data or {}).get("status", "unavailable"),
+            "unavailable_reason": (news_data or {}).get("unavailable_reason", ""),
+            "sentiment_score": (news_data or {}).get("score"),
+            "sentiment_label": (news_data or {}).get("sentiment"),
             "article_count": (news_data or {}).get("article_count", 0),
             "bullish_keyword_hits": (news_data or {}).get("bullish_count", 0),
             "bearish_keyword_hits": (news_data or {}).get("bearish_count", 0),

@@ -1,6 +1,6 @@
 # LLM Multi-Dimensional Evaluation Framework
-> 2026-03-07 | Based on 4-model comparison on structured financial reasoning task
-> Models: MiniMax-M2.5, Kimi-K2.5, GLM-5, Qwen3.5-Plus
+> 2026-03-07 → 2026-03-08 | Based on 5-model comparison on structured financial reasoning task
+> Models: MiniMax-M2.5, Kimi-K2.5, GLM-5, Qwen3.5-Plus, **Gemini-3.1-Pro** (added 2026-03-08)
 > Task: 3-stage stock screening (triage → deep analysis → cross-stock judge)
 > Data: 8 tickers across 8 GICS sectors, identical input payloads
 
@@ -48,9 +48,12 @@ System prompt 为三个阶段分别指定了 strict JSON schema:
 **Qwen3.5-Plus** — Schema 完美遵循，零 key 缺失，零 type error。但 summary 使用 plain string（没有像 Kimi/GLM-5 那样自发结构化），说明在 "超越字面指令" 方面偏保守。
 **评级: 9/10**
 
+**Gemini-3.1-Pro** — Schema 完美遵循。Summary 使用 plain string 但质量很高——market regime assessment 准确且简洁。最值得注意的是对 schema 的**智能解读**：对于 judge 中被拒绝的候选股，Gemini 返回了 `rejection_reason` 而非 `selection_reason`，这不是 schema violation，而是对 prompt 意图的更深层理解（被拒绝的股票不应该有"选择理由"）。没有像 Kimi/GLM-5 那样主动结构化 summary。
+**评级: 9/10**
+
 ### Dimension Insight
 
-所有 4 个模型在 instruction following 上几乎满分。这是 **post-RLHF 时代的 table stakes**——经过 SFT + RLHF 训练的模型在明确指令下的 schema compliance 已经很强。`response_format: json_object` 参数也起到了额外的约束作用。
+所有 5 个模型在 instruction following 上几乎满分。这是 **post-RLHF 时代的 table stakes**——经过 SFT + RLHF 训练的模型在明确指令下的 schema compliance 已经很强。`response_format: json_object` 参数也起到了额外的约束作用。
 
 **真正的区分不在于"是否遵循"，而在于"如何超越"**——Kimi 和 GLM-5 在 prompt 未明确要求的地方（summary 字段）主动选择了更有用的结构化格式，这暗示它们的 instruction following 训练不仅优化了"遵循规则"，还优化了"理解意图"。
 
@@ -60,6 +63,7 @@ System prompt 为三个阶段分别指定了 strict JSON schema:
 | kimi-k2.5 | **9/10** | Proactive structured summary |
 | glm-5 | **9/10** | Proactive structure + most detailed arrays |
 | qwen3.5-plus | **9/10** | Clean compliance, literal interpretation |
+| gemini-3.1-pro | **9/10** | Smart schema interpretation, high-density summary |
 
 ---
 
@@ -75,6 +79,7 @@ System prompt 为三个阶段分别指定了 strict JSON schema:
 | kimi-k2.5 | 0.72×7 | **1** | 0.000 | 0.00 | **Zero** |
 | glm-5 | 0.65×5, 0.72, 0.75 | 3 | 0.040 | 0.10 | Low |
 | qwen3.5-plus | 0.65×4, 0.70, 0.75, 0.85 | 4 | 0.073 | 0.20 | Moderate |
+| gemini-3.1-pro | 0.75×2, 0.80, 0.85×5 | 3 | ~0.040 | 0.10 | Low |
 
 ### Deep Confidence Distribution
 
@@ -84,6 +89,7 @@ System prompt 为三个阶段分别指定了 strict JSON schema:
 | kimi-k2.5 | 0.58×4, 0.64 | **2** | 0.027 | 0.06 |
 | glm-5 | 0.55, 0.58, 0.62×2, 0.65 | 4 | 0.039 | 0.10 |
 | qwen3.5-plus | 0.52, 0.58, 0.62×3 | 3 | 0.044 | 0.10 |
+| gemini-3.1-pro | 0.60, 0.65×3, 0.75 | 3 | ~0.055 | 0.15 |
 
 ### Per-Model Analysis
 
@@ -114,6 +120,11 @@ Deep 阶段好一些：UNH 0.65（最高，defensive + dividend）→ LIN/NEE 0.
 Deep 阶段 NVDA 获得最低的 0.52（counter_trend_bounce = 高风险 setup），其他防御性股票 0.62。**单调性正确**：高风险 → 低 confidence。
 **评级: 7/10**
 
+**Gemini-3.1-Pro** — Triage range 仅 0.10（0.75-0.85），所有值 ≥0.75——这意味着 Gemini 的 confidence floor 很高，**无法表达低置信度**。DIS reject(0.85) 和 LIN keep(0.85) 给出了相同的 confidence 但方向完全相反——这是校准失败的典型信号。Deep 阶段好得多：NEE 0.75（防御性，最高）> JPM/LIN/UNH 0.65 > NVDA 0.60（最高风险，最低）——**单调性正确**，说明 deep 的 confidence 更接近真实的不确定性估计。
+
+从 RLHF 角度：Gemini 的高 confidence bias（全部 ≥0.75）可能来自 instruction-tuning 阶段对"confident response"的过度奖励——Google 的训练可能偏向于奖励果断回答。这在 chat 场景下是优势（用户不喜欢犹豫不决的 AI），但在金融校准场景下是劣势。
+**评级: 5/10**
+
 ### Dimension Insight
 
 **Calibration 是 RLHF 训练中最被忽视的维度之一。** 当前主流的 RLHF pipeline（SFT → Reward Model → PPO/DPO）主要优化 response quality 和 safety，但很少有专门的 calibration objective。这解释了为什么 Kimi 在其他维度表现不错但校准完全失败——它的 reward model 可能根本没有区分不同 confidence 值的 preference data。
@@ -134,6 +145,7 @@ Deep 阶段 NVDA 获得最低的 0.52（counter_trend_bounce = 高风险 setup�
 | kimi-k2.5 | observe(0.72) | mean_reversion_oversold_bounce | 0.58 | 7 | 8 | **Partial** — more bear than bull, but conf doesn't reflect this |
 | glm-5 | reject(0.72) | mean_reversion_value_bounce | 0.58 | 6 | 6 | **Tension** — rejected at triage but deep still gives tradeable setup. Note: deep payload is pre-built by pipeline regardless of triage, so this isn't a model bug, but reveals GLM-5's triage is stricter than its deep analysis |
 | qwen3.5-plus | reject(0.85) | oversold_mean_reversion | 0.58 | 6 | 6 | **Same tension** as GLM-5 — but Qwen's higher reject confidence (0.85) makes the tension more visible |
+| gemini-3.1-pro | reject(0.85) | Mean Reversion / Support Bounce | 0.65 | 4 | 5 | **Same tension** as GLM-5/Qwen — rejected at triage but deep gives tradeable setup (0.65). Pipeline artifact |
 
 ### Case Study 2: NVDA (Tech, -3%, below MAs, sector weak)
 
@@ -143,6 +155,7 @@ Deep 阶段 NVDA 获得最低的 0.52（counter_trend_bounce = 高风险 setup�
 | kimi-k2.5 | mean_reversion_bounce_with_event_catalyst | 0.58 | 8 | 8 | **No** — balanced bull/bear but same conf as everything else |
 | glm-5 | mean_reversion_support_test | 0.55 | 6 | 6 | **Yes** — balanced evidence → moderate conf, lower than defensive picks (0.62-0.65) |
 | qwen3.5-plus | counter_trend_bounce | 0.52 | 8 | **9** | **Best** — "counter_trend" setup name implies risk, most bear points, lowest tradeable conf |
+| gemini-3.1-pro | Mean Reversion / Support Bounce | 0.60 | 3 | 4 | **Good** — observe(0.8) → deep 0.60 (bear > bull) → "Mean Reversion / Support Bounce" — coherent direction, lowest deep conf |
 
 ### Case Study 3: NEE (Utilities, defensive, near 52w high, bullish news)
 
@@ -152,6 +165,7 @@ Deep 阶段 NVDA 获得最低的 0.52（counter_trend_bounce = 高风险 setup�
 | kimi-k2.5 | keep(0.72) | defensive_dividend_catalyst | 0.58 | Flat — same conf everywhere |
 | glm-5 | observe(0.65) | defensive_pullback | 0.62 | **Good** — conservative triage → slightly higher deep conf once analyzed in detail |
 | qwen3.5-plus | keep(0.75) | defensive_dividend_capture | 0.62 | **Good** — keep aligns with defensive thesis, conf reflects moderate opportunity |
+| gemini-3.1-pro | keep(0.85) | Defensive Rotation / Relative Strength | 0.75 | **Perfect** — keep(0.85) → deep 0.75 (highest) → judge #1. Consistent conviction throughout |
 
 ### Per-Model Analysis
 
@@ -166,6 +180,9 @@ Deep 阶段 NVDA 获得最低的 0.52（counter_trend_bounce = 高风险 setup�
 
 **Qwen3.5-Plus** — **最好的推理链**。NVDA 是最好的例子：setup 名为 "counter_trend_bounce"（暗示逆势=风险）、bear 9 > bull 8、conf 0.52 是所有可交易 setup 中最低的。从 setup 命名 → 证据分布 → confidence 数值，三者完全一致。JPM 的 reject(0.85) 也很有说服力——高确信度拒绝配合详实的 bear case。
 **评级: 9/10**
+
+**Gemini-3.1-Pro** — 推理链整体质量好。NEE 是最佳案例：keep(0.85) → deep 0.75（最高 deep conf）→ judge #1——从 triage 到最终排名的完美一致性。NVDA 也展现了良好的一致性：observe(0.8) → deep 0.60（4 bear > 3 bull）→ setup "Mean Reversion / Support Bounce"——方向连贯，deep confidence 正确反映了 bear 多于 bull 的证据分布。JPM 的 triage-deep 张力（reject 0.85 → deep 0.65 可交易）与 GLM-5/Qwen 一样，是 pipeline artifact 而非模型缺陷。Deep confidence 的单调性正确：NEE 0.75 > JPM/LIN/UNH 0.65 > NVDA 0.60。
+**评级: 8/10**
 
 ### Dimension Insight
 
@@ -185,6 +202,7 @@ Reasoning consistency 本质上测试的是模型的 **CoT (Chain-of-Thought) �
 | kimi-k2.5 | 5/5 has price | **5/5** (specific: ">15M shares") | **Yes** (AND + OR + pattern) | **Exact**: $289.24, $482.20 |
 | glm-5 | 5/5 has price | **5/5** (specific: ">11M shares") | Yes (OR + RSI condition) | **Exact**: $283.71, $488.54 |
 | qwen3.5-plus | 5/5 has price | **5/5** (specific + relative: "1.5x average") | Yes (OR) | **Mixed**: $295, $482.20 |
+| gemini-3.1-pro | 5/5 has price | 5/5 (specific: "above-average volume") | Yes (AND) | **Specific**: $91.83, $178.50 |
 
 ### Invalidation Quality (止损条件)
 
@@ -194,6 +212,7 @@ Reasoning consistency 本质上测试的是模型的 **CoT (Chain-of-Thought) �
 | kimi-k2.5 | 5/5 | **2/5** ("2+ sessions") | 0/5 | **AND + OR + time** | "Close below $289.24 on volume >15M, OR sustained below $287.50 for 2+ sessions" |
 | glm-5 | 5/5 | 0/5 | **1/5** ("VIX >35") | OR + indicator | "Close below $283.71 OR RSI dropping below 30 on rising volume" |
 | qwen3.5-plus | 5/5 | 0/5 | **2/5** ("VIX >35") | OR + macro | "Close below $283.70 or VIX spike above 35" |
+| gemini-3.1-pro | 5/5 | 0/5 | 0/5 | OR conditions | "Daily close below $176.50" |
 
 ### Holding Window Quality
 
@@ -203,6 +222,7 @@ Reasoning consistency 本质上测试的是模型的 **CoT (Chain-of-Thought) �
 | kimi-k2.5 | "1-2 weeks" range | Yes (CPI, FOMC, div) | **Yes** (Mar 10-11) | "target exit March 10-11 pre-ex-dividend" |
 | glm-5 | "5-10 days" range | Yes (CPI, FOMC, div) | Partial (Mar 14-21) | "target exit by March 14-21 to capture dividend" |
 | qwen3.5-plus | "7-10 days" range | Yes (FOMC, div) | Yes (Mar 18) | "exit before FOMC March 18" |
+| gemini-3.1-pro | "1-2 weeks" range | Yes (macro calendar) | No (generic) | "1-2 weeks holding window" |
 
 ### Per-Model Analysis
 
@@ -217,6 +237,9 @@ Reasoning consistency 本质上测试的是模型的 **CoT (Chain-of-Thought) �
 
 **Qwen3.5-Plus** — 结合了 specific volume（">12M shares"）和 relative volume（"1.5x average"），两种表达都实用。加入了 VIX 止损条件，说明考虑了宏观风险。价格精度混合——有些四舍五入（$295），有些精确（$482.20）。Holding window 清晰地标注了 exit 锚点（FOMC March 18）。
 **评级: 8/10**
+
+**Gemini-3.1-Pro** — 所有 5 个 trigger 都包含 price + volume 条件。NEE 的 trigger 示例："Break and hold above 20-day MA at $91.83 with above-average volume"——价格具体且引用了技术指标。NVDA："Confirmed hourly close above $178.50 with expanding volume"——使用了更细的时间粒度（hourly）。止损条件每个都有 price stop（如 NVDA "Daily close below $176.50"），但缺乏时间止损和 VIX 止损（GLM-5/Qwen 有 VIX stop）。Holding window 使用通用的 "1-2 weeks" 而非具体日期锚点——这是 Gemini 在 actionability 上最大的短板。
+**评级: 7/10**
 
 ### Dimension Insight
 
@@ -236,6 +259,7 @@ Actionability 高度依赖于**输入数据质量**。我们在 v2 中新增的 
 | kimi-k2.5 | **6.1** | 2.6 | **Sees most risks but acts least** |
 | glm-5 | 5.8 | **7.4** | **Most thorough rejection reasoning** |
 | qwen3.5-plus | 5.0 | 4.6 | Moderate |
+| gemini-3.1-pro | ~4.0 | ~3.1 | Balanced, decisive actions |
 
 ### JPM Stress Test (RSI=36, -7.57% RS vs SPY, VIX=29.5)
 
@@ -247,6 +271,7 @@ JPM 这天的客观状态：严重超卖、板块最弱、VIX 高企。reject �
 | kimi-k2.5 | observe(0.72) | — | Lists 6 risk flags → conf still 0.72 (same as everything) → observe. **Risk recognition → zero action**. This is the worst pattern: model appears risk-aware but the risk doesn't change its decision |
 | glm-5 | **reject(0.72)** | — | Lists 7.4 reject reasons → rejects with 0.72 conf. **Risk recognition → decisive action**. The only model (besides Qwen) that converts risk analysis into rejection |
 | qwen3.5-plus | **reject(0.85)** | — | **Risk recognition → strongest action**. Highest confidence rejection in the entire test. The 0.85 says "I'm very sure this should be rejected" |
+| gemini-3.1-pro | **reject(0.85)** | — | **Risk recognition → decisive action**. Same as Qwen — high-confidence rejection. Also rejected DIS (unique among all models) |
 
 ### NVDA Risk Assessment (Tech, -3%, below MA20/MA50)
 
@@ -256,6 +281,7 @@ JPM 这天的客观状态：严重超卖、板块最弱、VIX 高企。reject �
 | kimi-k2.5 | 0.58 | 8 | **Under-reaction**: same conf as defensive plays (NEE 0.58, UNH 0.58). 8 bear points should lower conf |
 | glm-5 | 0.55 | 6 | **Calibrated**: lower than defensive picks (0.62-0.65), proportional to risk level |
 | qwen3.5-plus | **0.52** | **9** | **Best calibrated**: most bear points → lowest tradeable conf. Risk is quantified and reflected |
+| gemini-3.1-pro | 0.60 | 4 | **Appropriate downgrade**: observe(0.8) at triage → deep 0.60 — second-lowest deep conf, reflects high risk |
 
 ### Per-Model Analysis
 
@@ -271,6 +297,9 @@ JPM 这天的客观状态：严重超卖、板块最弱、VIX 高企。reject �
 **Qwen3.5-Plus** — JPM reject(0.85) 是全场最强的风险行动——不仅拒绝了，还给了最高确信度。NVDA 给出了最多 bear 点（9 个）和最低可交易 confidence（0.52）。risk→action 的转化最为流畅和可预测。
 **评级: 9/10**
 
+**Gemini-3.1-Pro** — 风险→行动的转化很强。JPM reject(0.85)——与 Qwen 一样的果断行动。更突出的是 DIS：**Gemini 是所有 5 个模型中唯一 reject DIS 的**（其他模型全部 observe）。DIS 的 reject 有充分数据支持：负面情绪、板块逆风、下降趋势——Gemini 将这些风险信号转化为了明确的拒绝决策，而非模糊的观望。NVDA observe(0.8) → deep 0.60 的降级也合理。avg risk_flags ~4.0/ticker 虽然不如 Kimi/GLM-5 的识别数量多，但 risk→action 的转化效率更高——识别少但每个都有行动。
+**评级: 8/10**
+
 ### Dimension Insight
 
 从 RLHF 角度：**Risk sensitivity = f(reward_model_risk_awareness)**。如果 reward model 主要从 "helpful = give useful advice" 角度训练，模型倾向于 keep/observe（因为 "给建议" > "说不"）。GLM-5 和 Qwen 可能在 reward model 中纳入了 "helpful = protect from bad decisions" 的 preference data，因此展现出更好的风险行动转化。
@@ -285,18 +314,19 @@ Kimi 的问题特别值得关注：**能识别风险但不行动，比不能识�
 
 ### Information Source Utilization Matrix
 
-| Data Source | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus |
-|------------|---------|-----------|-------|-------------|
-| OHLC support/resistance | Used (rounded) | Used (exact) | Used (exact) | Used (mixed) |
-| Macro calendar (CPI/FOMC) | In holding window | In trigger + holding | In holding window | In holding + invalidation |
-| VIX level | Judge only | All phases | All phases | All phases |
-| Options PCR/max pain | **Minimal** | Referenced | **Detailed** (UNH PCR=0.43) | Moderate |
-| News sentiment rollup | **Minimal** | Moderate | Moderate | Moderate |
-| Relative strength vs SPY | Judge only | Judge + deep | **Judge + deep** | Judge + deep |
-| Volume (specific values) | Ratio-based only | **Exact shares** | **Exact shares** | **Exact + relative** |
-| Dividend dates | Ex-div mentioned | **Payment + ex-div** | Ex-div timing | Ex-div + payment |
-| Analyst targets/ratings | Judge (mention) | Deep + Judge | **Deep + Judge** (detailed) | Deep + Judge |
-| Bollinger Band position | Not mentioned | Not mentioned | **Referenced** (NVDA BB=0.06) | Not mentioned |
+| Data Source | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus | gemini-3.1-pro |
+|------------|---------|-----------|-------|-------------|----------------|
+| OHLC support/resistance | Used (rounded) | Used (exact) | Used (exact) | Used (mixed) | Used (exact) |
+| Macro calendar (CPI/FOMC) | In holding window | In trigger + holding | In holding window | In holding + invalidation | In holding window |
+| VIX level | Judge only | All phases | All phases | All phases | All phases |
+| Options PCR/max pain | **Minimal** | Referenced | **Detailed** (UNH PCR=0.43) | Moderate | **Detailed** (UNH PCR=0.67, NVDA max pain $182.50) |
+| News sentiment rollup | **Minimal** | Moderate | Moderate | Moderate | Moderate |
+| Relative strength vs SPY | Judge only | Judge + deep | **Judge + deep** | Judge + deep | Triage + deep |
+| Volume (specific values) | Ratio-based only | **Exact shares** | **Exact shares** | **Exact + relative** | "above-average" (relative) |
+| Dividend dates | Ex-div mentioned | **Payment + ex-div** | Ex-div timing | Ex-div + payment | Not prominent |
+| Analyst targets/ratings | Judge (mention) | Deep + Judge | **Deep + Judge** (detailed) | Deep + Judge | Deep + Judge |
+| Bollinger Band position | Not mentioned | Not mentioned | **Referenced** (NVDA BB=0.06) | Not mentioned | Not mentioned |
+| Options unusual activity | Not mentioned | Not mentioned | Mentioned | Not mentioned | **Detailed** (NVDA put strikes $200/$207.5/$230) |
 
 ### Per-Model Analysis
 
@@ -316,6 +346,9 @@ Kimi 的问题特别值得关注：**能识别风险但不行动，比不能识�
 
 **Qwen3.5-Plus** — 信息覆盖面不错：macro calendar 用在了 holding window 和 invalidation（VIX stop），relative strength 在 deep + judge 中都有引用，volume 同时给出了绝对值和相对倍数（"1.5x average"）。但 options data 利用中等，Bollinger Band 未引用。整体属于"广而不深"——覆盖了大部分数据源但每个都不如 GLM-5 深入。
 **评级: 7/10**
+
+**Gemini-3.1-Pro** — **期权数据利用出色**，接近 GLM-5 水平。引用了 UNH PCR=0.67（看涨信号）、NVDA 和 UNH 的 max pain levels（$182.50 和 $292.50/$300）、NVDA 的异常 put 期权成交量（具体 strike prices: $200/$207.5/$230）。LIN 的 PCR=8.0（极度偏空）也被正确识别。但没有引用 Bollinger Band（GLM-5 独有），dividend dates 不突出，volume 使用了相对表达（"above-average"）而非绝对值。整体风格是"深且具体"而非"广而浅"——在 options 维度上深度挖掘，但其他维度的覆盖不如 GLM-5 全面。
+**评级: 8/10**
 
 ### Dimension Insight
 
@@ -371,6 +404,14 @@ GLM-5 的优势暗示它可能在训练中使用了更好的 long-context SFT �
 **跨任务一致性**: **较高**。Triage 的 balanced decision（用了 keep/observe/reject 全部三类）和 deep 的 calibrated confidence 以及 judge 的合理排名，三者之间逻辑连贯。唯一的不一致是格式层面的（LIN setup_type 用了自然语言）。
 **评级: 8/10**
 
+**Gemini-3.1-Pro**
+- Triage: **Balanced** — 3 keep / 3 observe / 2 reject，最均衡的分布。DIS reject 是独特且有据的判断
+- Deep: **Calibrated** — confidence 单调性正确（NEE 0.75 > others 0.65 > NVDA 0.60），bull/bear 数量精简但到位
+- Judge: **Strong** — NEE #1 与 GLM-5 一致，rejected candidates 有 rejection_reason（schema 智能解读）
+
+**跨任务一致性**: **高**。三个任务展现一致的 "decisive analyst" 人格——triage 果断（rejects DIS+JPM），deep 提供冷静分析，judge 产出清晰层级并为被拒候选提供拒绝理由。没有像 MiniMax 的 NVDA 那样的 erratic jumps。唯一的弱点是 JPM 的 triage-deep 张力（reject → tradeable），这是 pipeline artifact。
+**评级: 8/10**
+
 ### Dimension Insight
 
 Cross-task transfer 反映了模型的 **generalization depth**。GLM-5 在三个完全不同的任务上保持了一致的高质量，说明它不是在做 task-specific pattern matching，而是真正理解了底层的推理任务。MiniMax 的 inconsistency（deep NVDA 极端但 judge 正常）暗示其在不同 context length/complexity 下的行为不稳定。
@@ -389,6 +430,7 @@ Cross-task transfer 反映了模型的 **generalization depth**。GLM-5 在三�
 | kimi-k2.5 | 3,499 (500/call) | 4,051 (810/call) | 1,180 | 8,730 | **624** |
 | glm-5 | 12,781 (1,598/call) | 7,926 (1,585/call) | 3,096 | 23,803 | **1,700** |
 | qwen3.5-plus | 29,506 (**3,688/call**) | 6,621 (1,324/call) | 4,276 | 40,403 | **2,886** |
+| gemini-3.1-pro | 2,624 (328/call) | 2,475 (495/call) | 622 | 5,729 | **409** |
 
 ### Input Token Comparison
 
@@ -398,6 +440,7 @@ Cross-task transfer 反映了模型的 **generalization depth**。GLM-5 在三�
 | kimi-k2.5 | 277,209 | 3.1% |
 | glm-5 | 298,019 | 8.0% |
 | qwen3.5-plus | **331,157** | **12.2%** |
+| gemini-3.1-pro | 341,118 | **1.7%** |
 
 ### Per-Model Analysis
 
@@ -411,6 +454,11 @@ Cross-task transfer 反映了模型的 **generalization depth**。GLM-5 在三�
 
 **GLM-5** — 输出量最大中的第二（23K），但 **token→信息的转化率最高**。GLM-5 的"冗余" token 几乎都在于：更详细的 risk flags（7.4 items vs 平均 5.2）、更丰富的 judge selection_reason（引用了 options flow、Bollinger Band 等细节数据）。这些不是冗余——它们提供了可审计的推理依据。Judge output 3,096 tokens 是 Kimi 的 2.6x，但包含了 portfolio_overlap 分析和 market_regime_assessment 结构化数据。
 **评级: 7/10**
+
+**Gemini-3.1-Pro** — **所有模型中效率最高**。409 tokens/call 平均输出——比此前最高效的 Kimi（624）还低 34%，是 Qwen（2,886）的 1/7。Triage 仅 328 tokens/call，deep 495 tokens/call，judge 622 tokens。每个输出简洁但完整——bull/bear cases 各 3-4 项（而非 GLM-5 的 6-8 项），trigger/invalidation 是单句明确表达。Gemini 的 output 是**信息密集型**——没有冗余 token，但所有 schema 要求的字段都有且内容具体。Out/In ratio 仅 1.7%——在 341K input tokens 上只产出 5.7K output tokens，极致的信息压缩。
+
+Google 的 RLHF 似乎同时优化了 conciseness 和 decisiveness——这是一个不常见的组合。大多数模型在简洁时会变得模糊（如 Kimi 的 confidence 退化），但 Gemini 的简洁伴随着明确的判断。
+**评级: 10/10**
 
 **Qwen3.5-Plus** — **最冗余**。Triage 阶段尤为明显：3,688 tokens/call 是 Kimi 的 7.4 倍。这大量的 token 来自更长的 why_keep/why_reject 列表和更详细的 risk_flags 描述。Deep 阶段 1,324/call 回归正常，说明冗余主要发生在分类任务（triage）而非分析任务（deep）。
 
@@ -439,14 +487,15 @@ Prompt 只说 "return setup_type"，未指定 snake_case。但作为 machine-par
 | kimi-k2.5 | **5/5 (100%)** | High | `mean_reversion_oversold_bounce`, `defensive_dividend_catch` |
 | glm-5 | **5/5 (100%)** | High | `mean_reversion_value_bounce`, `defensive_pullback` |
 | qwen3.5-plus | **4/5 (80%)** | **Low** | `oversold_mean_reversion` OK, but `Defensive Rotation / Mean Reversion` breaks convention |
+| gemini-3.1-pro | **0/5 (0%)** | **Consistent (wrong)** | ALL use natural language with slashes: `Mean Reversion / Support Bounce` |
 
 ### Judge Output Structure Consistency
 
-| Field | Prompt Spec | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus |
-|-------|------------|---------|-----------|-------|-------------|
-| summary | "summary" (unspecified format) | string | **dict** | **dict** | string |
-| portfolio_overlap_flags | "portfolio_overlap_flags" | **Missing** | snake_case array | Natural language array | Title_Case array |
-| ranked_candidates sub-keys | "ticker, final_rank, selection_reason, rejection_reason" | Present | Present | Present | Present |
+| Field | Prompt Spec | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus | gemini-3.1-pro |
+|-------|------------|---------|-----------|-------|-------------|----------------|
+| summary | "summary" (unspecified format) | string | **dict** | **dict** | string | string (high quality) |
+| portfolio_overlap_flags | "portfolio_overlap_flags" | **Missing** | snake_case array | Natural language array | Title_Case array | **Missing** |
+| ranked_candidates sub-keys | "ticker, final_rank, selection_reason, rejection_reason" | Present | Present | Present | Present | Present (smart: rejection_reason for rejects) |
 
 ### Per-Model Analysis
 
@@ -461,6 +510,11 @@ Prompt 只说 "return setup_type"，未指定 snake_case。但作为 machine-par
 
 **Qwen3.5-Plus** — 最不一致的模型。setup_type 有一个违规（LIN 用了自然语言 + 斜杠），portfolio_overlap_flags 用了 Title_Case（`["Defensive_Style", "Low_Beta"]`）——既不是 snake_case 也不是自然语言，是第三种风格。Summary 用 plain string。三个不同字段三种命名风格，说明 Qwen 在格式 convention 上的 **内部一致性不足**。
 **评级: 6/10**
+
+**Gemini-3.1-Pro** — **格式一致性最差的模型**。setup_type 0/5 使用 snake_case——全部使用自然语言 + 斜杠格式（`"Mean Reversion / Support Bounce"`、`"Defensive Rotation / Relative Strength"`）。这是系统性违规，不是偶发。risk_flags 格式混乱——同一 response 中混合使用 snake_case（`"no_premarket_print"`）和自然语言（`"High market volatility (VIX near 30)"`）。portfolio_overlap_flags 在 judge 输出中完全缺失。Summary 用 plain string。
+
+Gemini 的格式偏好明显倾向于**人类可读性**而非**机器可解析性**——`"Mean Reversion / Support Bounce"` 比 `"mean_reversion_support_bounce"` 对人类更友好，但对下游 JSON parsing pipeline 是灾难。这是 Gemini 最大的弱点。
+**评级: 5/10**
 
 ### Dimension Insight
 
@@ -480,6 +534,7 @@ Format compliance 反映了模型的 **convention internalization**——是否�
 | kimi-k2.5 | 14 | 13 | 1 (connection reset) | 0 | **93%** |
 | glm-5 | 14 | 14 | 0 | 0 | **100%** |
 | qwen3.5-plus | 14+14 | 13+14 | 0 | 1 (judge, first run) | **93%** → 100% (re-run) |
+| gemini-3.1-pro | 14 | 14 | 0 | 0 | **100%** |
 
 ### Per-Model Analysis
 
@@ -504,6 +559,9 @@ Format compliance 反映了模型的 **convention internalization**——是否�
 并行化 + 增加 timeout 到 240s 后问题消失。但对于 production 系统，"有时超时有时不超时" 是比 "稳定慢" 更难处理的问题——需要 retry 机制和更大的 timeout budget。
 **评级: 8/10**
 
+**Gemini-3.1-Pro** — **零故障**。14 次调用全部成功，没有 timeout，没有 connection error。与 MiniMax 和 GLM-5 并列最稳定。Google 的 serving infrastructure 在稳定性上表现出色——即使 Gemini 是通过独立 API endpoint 调用（非 dashscope），也完全没有连接问题。结合其极低的延迟（avg 18.3s），意味着 timeout 可以安全地设到 30s——远低于其他模型需要的 90-120s。
+**评级: 10/10**
+
 ### Dimension Insight
 
 Robustness 主要由 **API infrastructure** 决定而非模型本身。MiniMax（独立 endpoint）和 GLM-5（dashscope 但稳定）最好。有趣的是，3 个 dashscope 模型共享同一 API key 但稳定性不同——这暗示 dashscope 可能对不同模型使用了不同的 serving infra（如不同规模的 GPU pool）。
@@ -518,21 +576,28 @@ Robustness 主要由 **API infrastructure** 决定而非模型本身。MiniMax�
 
 | Model | Mean | Median | P90 | Max | CV (变异系数) |
 |-------|------|--------|-----|-----|-------------|
-| **kimi-k2.5** | **25.0s** | **21.7s** | **42.4s** | **42.8s** | 0.43 |
-| minimax | 37.7s | 33.2s | 55.4s | **104.8s** | **0.57** |
-| glm-5 | 54.4s | 49.5s | 73.0s | 82.9s | **0.22** |
+| **gemini-3.1-pro** | **18.3s** | **17.8s** | **22.4s** | **24.6s** | **0.19** |
+| kimi-k2.5 | 25.0s | 21.7s | 42.4s | 42.8s | 0.43 |
+| minimax | 37.7s | 33.2s | 55.4s | 104.8s | 0.57 |
+| glm-5 | 54.4s | 49.5s | 73.0s | 82.9s | 0.22 |
 | qwen3.5-plus | 54.1s | 49.6s | 76.7s | 94.1s | 0.31 |
 
 ### Slowest Calls per Model
 
 | Model | #1 Slowest | #2 Slowest | #3 Slowest |
 |-------|-----------|-----------|-----------|
+| gemini-3.1-pro | deep LIN: 24.6s | deep JPM: 22.4s | deep NVDA: 21.6s |
 | minimax | triage NEE: **104.8s** | deep UNH: 55.4s | deep LIN: 42.7s |
 | kimi-k2.5 | deep JPM: 42.8s | deep LIN: 42.4s | triage DIS: 41.8s |
 | glm-5 | judge: **82.9s** | deep UNH: 73.0s | deep JPM: 64.0s |
 | qwen3.5-plus | judge: **94.1s** | triage DIS: 76.7s | triage JPM: 65.1s |
 
 ### Per-Model Analysis
+
+**Gemini-3.1-Pro** — **最快且最可预测的模型**。Mean 18.3s 比此前最快的 Kimi（25.0s）快 27%，比 GLM-5（54.4s）快 66%。CV=0.19 是所有模型中最低的——GLM-5 的 0.22 此前保持这个记录，但 Gemini 更优。Max 24.6s 仅为 mean 的 1.3 倍（对比 MiniMax 的 2.8 倍），完全没有 outlier。P90=22.4s 意味着 timeout 可以安全设到 30s——这是其他模型想都不敢想的值（GLM-5 需要 90s，Qwen 需要 120s）。
+
+速度优势来源分析：Google 的 serving infrastructure（TPU-based）在推理效率上有天然优势。结合 Gemini 极低的 output token 数（409/call），推理计算量本身也小。但关键是：**速度没有牺牲质量**——D5/D6/D7 都是 8 分，说明 Gemini 不是"快但肤浅"，而是"快且有内容"。
+**评级: 10/10**
 
 **MiniMax-M2.5** — 平均速度中等（37.7s），但有严重的长尾问题：NEE triage 104.8s 是平均值的 2.8 倍。这种不可预测性对 production pipeline 有负面影响——你需要把 timeout 设到 120s+ 才能避免偶尔的 false timeout，但大部分时间只需要 40s。CV=0.57 是所有模型中最高的，说明延迟方差最大。
 
@@ -562,10 +627,11 @@ Judge 94.1s（re-run）还可接受，但首次运行的 183s timeout 说明 Qwe
 从推理机制角度：如果模型内部使用了 **extended thinking / internal CoT**（类似 o1），延迟增加可能意味着 **更多的 test-time compute**，这不一定是坏事。GLM-5 的 "慢但稳定" 可能恰恰是 "投入了恰当的推理时间" 的表现。理想的评估应该是 **延迟-质量 Pareto frontier**——在给定时间预算下谁的质量最高。
 
 按 quality/latency ratio：
-- Kimi: 6.4 quality / 25s = 0.26 quality/s（最高效）
+- **Gemini: 8.1 quality / 18s = 0.45 quality/s（最高效，遥遥领先）**
+- Kimi: 6.4 quality / 25s = 0.26 quality/s
+- MiniMax: 7.0 quality / 38s = 0.18 quality/s
 - GLM-5: 8.1 quality / 54s = 0.15 quality/s
 - Qwen: 7.6 quality / 54s = 0.14 quality/s
-- MiniMax: 7.0 quality / 38s = 0.18 quality/s
 
 ---
 
@@ -581,6 +647,7 @@ Judge 94.1s（re-run）还可接受，但首次运行的 183s timeout 说明 Qwe
 | kimi-k2.5 | 4 | 3 | 0 | 2/3 | Moderate |
 | glm-5 | 0 | 7 | 1 | 2/3 | Low |
 | qwen3.5-plus | 2 | 5 | 1 | **3/3** | **Highest** |
+| gemini-3.1-pro | 3 | 3 | 2 | **3/3** | **Highest** |
 
 ### Unique/Minority Positions
 
@@ -594,6 +661,9 @@ Judge 94.1s（re-run）还可接受，但首次运行的 183s timeout 说明 Qwe
 | glm-5 | NEE #1 in judge (others: #2) | None (unique) | **Defensible** — NEE has best sector-relative positioning for risk-off |
 | qwen3.5-plus | JPM reject(0.85) | glm-5 | **Strongest** — highest conviction rejection, well-reasoned |
 | qwen3.5-plus | Uses all 3 verdict categories | None (unique) | **Good** — most expressive triage vocabulary |
+| gemini-3.1-pro | DIS reject(0.85) | None (unique) | **Strong** — only model to reject DIS, well-supported by data (negative sentiment, sector headwind, downtrend) |
+| gemini-3.1-pro | Most balanced distribution (3/3/2) | None (unique) | **Good** — most even use of all verdict categories |
+| gemini-3.1-pro | NEE #1 in judge | glm-5 | **Defensible** — agrees with GLM-5's analytical conclusion |
 
 ### Per-Model Analysis
 
@@ -609,6 +679,9 @@ Judge 94.1s（re-run）还可接受，但首次运行的 183s timeout 说明 Qwe
 **Qwen3.5-Plus** — **最高质量的 decision diversity**。它是唯一使用了全部三个 triage 类别（keep/observe/reject）的模型，说明它在分类空间上的 exploration 最充分。JPM reject(0.85) 是全场最强的独立决策——不仅做了不同的选择，还以最高 confidence 做了。NVDA 0.52（最低可交易 conf）也是一个差异化但合理的判断。Qwen 的 diversity 来自于**更细致的区分**——它不是简单地说 yes/no，而是给每个股票一个精确定位。
 **评级: 9/10**
 
+**Gemini-3.1-Pro** — Verdict 分布 keep(3) / observe(3) / reject(2)——**所有模型中最均衡的**。与 Qwen 一样使用了全部 3 个 verdict 类别。DIS reject 是高质量的独立判断——**所有其他模型都对 DIS 给出 observe**，但 Gemini 根据负面情绪、板块逆风和下降趋势果断 reject，这一独特立场有充分的数据支持。NEE #1 在 judge 中与 GLM-5 一致——在 NEE vs LIN #1-#2 的跨模型分歧中，Gemini 站在了 GLM-5 一边（2 vs 3）。整体 diversity 质量高但不如 Qwen 的 JPM 0.85 reject 那样具有 conviction 强度。
+**评级: 8/10**
+
 ### Dimension Insight
 
 Decision diversity 的底层机制是模型的 **exploration-exploitation tradeoff**。在 RLHF 训练中：
@@ -622,21 +695,21 @@ Decision diversity 的底层机制是模型的 **exploration-exploitation tradeo
 
 ## Composite Scorecard
 
-| Dimension | Category | Weight | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus |
-|-----------|----------|--------|---------|-----------|-------|-------------|
-| D1: Instruction Following | Training | 5% | 9 | 9 | 9 | 9 |
-| D2: Confidence Calibration | Training | 12% | **8** | 2 | 6 | 7 |
-| D3: Reasoning Consistency | Inference | 12% | 7 | 7 | 8 | **9** |
-| D4: Actionability | Inference | 10% | 7 | **9** | 8 | 8 |
-| D5: Risk Sensitivity | Inference | 12% | 6 | 4 | **9** | **9** |
-| D6: Information Utilization | Inference | 10% | 6 | 8 | **9** | 7 |
-| D7: Cross-Task Transfer | Training | 8% | 6 | 7 | **9** | 8 |
-| D8: Output Efficiency | Inference | 5% | 8 | **9** | 7 | 5 |
-| D9: Format Compliance | Training | 5% | 8 | **9** | 8 | 6 |
-| D10: Robustness | Usage | 8% | **10** | 7 | **10** | 8 |
-| D11: Latency Profile | Usage | 5% | 7 | **9** | 6 | 5 |
-| D12: Decision Diversity | Training | 8% | 6 | 4 | 8 | **9** |
-| **Weighted Total** | | **100%** | **7.0** | **6.4** | **8.1** | **7.6** |
+| Dimension | Category | Weight | minimax | kimi-k2.5 | glm-5 | qwen3.5-plus | gemini-3.1-pro |
+|-----------|----------|--------|---------|-----------|-------|-------------|----------------|
+| D1: Instruction Following | Training | 5% | 9 | 9 | 9 | 9 | 9 |
+| D2: Confidence Calibration | Training | 12% | **8** | 2 | 6 | 7 | 5 |
+| D3: Reasoning Consistency | Inference | 12% | 7 | 7 | 8 | **9** | 8 |
+| D4: Actionability | Inference | 10% | 7 | **9** | 8 | 8 | 7 |
+| D5: Risk Sensitivity | Inference | 12% | 6 | 4 | **9** | **9** | 8 |
+| D6: Information Utilization | Inference | 10% | 6 | 8 | **9** | 7 | 8 |
+| D7: Cross-Task Transfer | Training | 8% | 6 | 7 | **9** | 8 | 8 |
+| D8: Output Efficiency | Inference | 5% | 8 | 9 | 7 | 5 | **10** |
+| D9: Format Compliance | Training | 5% | 8 | **9** | 8 | 6 | 5 |
+| D10: Robustness | Usage | 8% | **10** | 7 | **10** | 8 | **10** |
+| D11: Latency Profile | Usage | 5% | 7 | 9 | 6 | 5 | **10** |
+| D12: Decision Diversity | Training | 8% | 6 | 4 | 8 | **9** | 8 |
+| **Weighted Total** | | **100%** | **7.0** | **6.4** | **8.1** | **7.6** | **7.8** |
 
 ### Radar Chart (Text Representation)
 
@@ -645,26 +718,27 @@ Decision diversity 的底层机制是模型的 **exploration-exploitation tradeo
                          9
                     ┌────┼────┐
         D12 Diversity    │    D2 Calibration
-             6-9    ┌───┤    2-8
+             6-9    ┌───┤    2-8 (Gemini: 5)
                     │   │   │
     D11 Latency  ───┤   │   ├─── D3 Reasoning
-         5-9        │   │   │        7-9
+        5-10        │   │   │        7-9
                     │   │   │
     D10 Robust  ───┤   │   ├─── D4 Actionability
         7-10        │   │   │        7-9
                     │   │   │
      D9 Format  ───┤   │   ├─── D5 Risk
-         6-9        │   │   │       4-9
+         5-9        │   │   │       4-9
                     └───┤   │
         D8 Efficiency   │    D6 Info Utilization
-             5-9        │         6-9
+            5-10        │         6-9
                     └────┼────┘
                     D7 Cross-Task
                         6-9
 
-GLM-5:  Most "round" profile — no dimension below 6
-Qwen:   Strongest on reasoning (D3,D5,D12), weakest on efficiency (D8,D11)
-Kimi:   Strongest on speed/format (D4,D8,D9,D11), weakest on calibration/risk (D2,D5,D12)
+GLM-5:   Most "round" profile — no dimension below 6
+Gemini:  Speed+efficiency champion (D8,D10,D11=10), but format/calibration weak (D2,D9=5)
+Qwen:    Strongest on reasoning (D3,D5,D12), weakest on efficiency (D8,D11)
+Kimi:    Strongest on speed/format (D4,D8,D9,D11), weakest on calibration/risk (D2,D5,D12)
 MiniMax: Strongest on robustness (D10), weakest on risk/info (D5,D6)
 ```
 
@@ -696,6 +770,12 @@ MiniMax: Strongest on robustness (D10), weakest on risk/info (D5,D6)
 - **RLHF Hypothesis**: Likely has the strongest CoT training (explains D3=9). Extended thinking architecture similar to o1-style models — trades latency for reasoning quality. The verbose triage output (3,688 tok/call) suggests internal CoT is being leaked to output rather than staying internal. Format inconsistency may stem from diverse training data without strong convention enforcement
 - **Best Use**: Research and auditing — when you need to understand WHY a decision was made, not just what it is
 
+### Gemini-3.1-Pro — "The Efficient Decisive Analyst"
+- **Strengths**: Fastest (18.3s avg), most efficient output (409 tok/call), most predictable latency (CV=0.19), decisive risk actions (DIS reject unique), strong options data utilization, 100% reliable
+- **Weaknesses**: Poor format compliance (no snake_case in setup_type), narrow confidence calibration (all triage ≥0.75), missing portfolio_overlap_flags
+- **RLHF/Training Hypothesis**: Google's RLHF appears optimized for conciseness and decisiveness simultaneously — an unusual combination. The high-confidence bias (all triage ≥0.75) might come from instruction-tuning that rewards confident responses. Excellent options data awareness suggests training data with financial domain coverage. The natural language format preference suggests training data was more human-authored reports than structured JSON
+- **Best Use**: Fast production screening where speed + decisiveness matter. Best cost-performance ratio (0.45 quality/s). Ideal for "first pass" triage in a multi-model pipeline. **Two-model strategy update**: Gemini (triage, 18s) → GLM-5 (deep+judge, 54s) could be even better than Kimi→GLM-5, offering both speed and higher triage quality
+
 ---
 
 ## Insights for LLM Research
@@ -723,9 +803,11 @@ Qwen 的 40K output tokens（Kimi 的 4.6x）没有带来 4.6x 的质量提升�
 ### 4. Cross-Model Agreement as Data Quality Proxy
 
 v1 测试（数据不完整）：3 个模型的 judge 排名有显著分歧
-v2 测试（数据改善后）：4 个模型的 judge 排名 #3-#5 完全一致
+v2 测试（数据改善后）：5 个模型的 judge 排名 #3-#5 完全一致（Gemini 确认了此前 4 模型的收敛发现）
 
 这强烈暗示：**当输入信息足够充分时，不同模型的推理会收敛**。模型之间的分歧很大程度上来自 "在信息不足时如何填补空白"——这正是训练数据偏见最容易显现的地方。
+
+NEE vs LIN #1-#2 的分歧更新：现在是 2 个模型（GLM-5 + Gemini）把 NEE 排 #1，3 个模型把 LIN 排 #1。有趣的是，两个非国产模型（GLM-5 虽然是国产但在这个维度上表现最像国际模型）在防御性资产评估上达成了一致。
 
 **Corollary**: Cross-model agreement rate 可以作为 **数据质量的 proxy metric**——如果多个模型在同一输入上给出不同的判断，首先应该检查输入数据是否充分，而不是急于判定某个模型更好。
 
@@ -734,7 +816,8 @@ v2 测试（数据改善后）：4 个模型的 judge 排名 #3-#5 完全一致
 | Use Case | Model | Key Dimensions |
 |----------|-------|---------------|
 | Production (quality-first) | **GLM-5** | D5+D6+D7+D10 = Risk + Info + Consistency + Robust |
-| Fast screening / triage | **Kimi-K2.5** | D4+D8+D9+D11 = Action + Efficiency + Format + Speed |
+| Fast screening / triage | **Gemini-3.1-Pro** | D8+D10+D11 = Efficiency + Robust + Speed |
 | Research / auditing | **Qwen3.5-Plus** | D3+D5+D12 = Reasoning + Risk + Diversity |
-| Two-model strategy | **Kimi (triage) → GLM-5 (deep+judge)** | Speed for filtering + Quality for analysis |
+| Two-model strategy | **Gemini (triage) → GLM-5 (deep+judge)** | 18s triage + quality analysis |
+| Alternative two-model | **Kimi (triage) → GLM-5 (deep+judge)** | Speed for filtering + Quality for analysis |
 | **Not recommended for primary** | MiniMax-M2.5 | Weakest D5+D6, NVDA miscalibration |

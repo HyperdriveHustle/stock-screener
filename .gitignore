@@ -1,17 +1,35 @@
-.env
-.venv/
-venv/
+# ── Python ──────────────────────────────────────
 __pycache__/
 **/__pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ── Environment & Secrets ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Runtime Data & Caches ──────────────────────
 data/*
 !data/.gitkeep
-data/*.db
+!data/macro_calendar_*.json
 
+# ── Output / Runs ──────────────────────────────
 output/*
 !output/.gitkeep
 
+# ── Logs ───────────────────────────────────────
 logs/*
 !logs/.gitkeep
 
+# ── OS / Editor ────────────────────────────────
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

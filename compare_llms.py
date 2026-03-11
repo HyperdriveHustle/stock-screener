@@ -21,43 +21,79 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 MODELS = {
     "minimax": {
+        "provider": "openai_compat",
         "provider_url": "https://api.minimaxi.com/v1/chat/completions",
         "api_key": os.environ.get("MINIMAX_API_KEY", ""),
         "model": "MiniMax-M2.5",
     },
     "kimi-k2.5": {
+        "provider": "openai_compat",
         "provider_url": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-        "api_key": "sk-sp-9acdca9eb5d54bce8cb8b28b534536c3",
+        "api_key": os.environ.get("DASHSCOPE_API_KEY", ""),
         "model": "kimi-k2.5",
     },
     "glm-5": {
+        "provider": "openai_compat",
         "provider_url": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-        "api_key": "sk-sp-9acdca9eb5d54bce8cb8b28b534536c3",
+        "api_key": os.environ.get("DASHSCOPE_API_KEY", ""),
         "model": "glm-5",
     },
     "qwen3.5-plus": {
+        "provider": "openai_compat",
         "provider_url": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-        "api_key": "sk-sp-9acdca9eb5d54bce8cb8b28b534536c3",
+        "api_key": os.environ.get("DASHSCOPE_API_KEY", ""),
         "model": "qwen3.5-plus",
+    },
+    "gemini-3.1-pro": {
+        "provider": "gemini",
+        "api_key": os.environ.get("GEMINI_API_KEY", ""),
+        "model": "gemini-3.1-pro-preview",
     },
 }
 
 TRIAGE_SYSTEM = (
     "You are running compact triage for a US equities swing-trading pipeline. "
-    "Use only the provided facts. Return strict JSON with keys: "
-    "triage_verdict(keep|observe|reject), triage_confidence(0~1), "
+    "Use only the provided facts. Return strict JSON.\n\n"
+    "Decision criteria:\n"
+    "- keep: clear setup exists (breakout, support bounce, catalyst) + favorable risk/reward + sector/macro tailwind\n"
+    "- reject: broken structure (below key MAs, weak sector, negative sentiment) with no offsetting catalyst\n"
+    "- observe: mixed signals or needs better entry timing\n"
+    "You MUST differentiate across candidates — use all three verdicts where appropriate.\n\n"
+    "Confidence calibration (spread across full range, do NOT cluster):\n"
+    "- 0.85+: overwhelming evidence in one direction\n"
+    "- 0.60-0.85: solid case but some counter-arguments\n"
+    "- 0.40-0.60: genuinely uncertain, mixed signals\n"
+    "- <0.40: very weak or conflicting evidence\n\n"
+    "Keys: triage_verdict(keep|observe|reject), triage_confidence(0~1), "
     "why_keep(array), why_reject(array), missing_info_requests(array), risk_flags(array)."
 )
 
 DEEP_SYSTEM = (
     "You are producing deep single-stock analysis for a US 1-2 week swing-trading pipeline. "
-    "Return strict JSON with keys: setup_type, bull_case(array), bear_case(array), "
+    "Return strict JSON.\n\n"
+    "Format requirements:\n"
+    "- setup_type: use snake_case (e.g. mean_reversion_bounce, breakout_continuation)\n"
+    "- bull_case / bear_case: 4-6 specific points each, cite exact numbers from the data\n"
+    "- trigger / invalidation: include specific price levels AND volume or indicator conditions\n"
+    "- holding_window: specify concrete date anchors (earnings, ex-div, FOMC) when relevant\n\n"
+    "Confidence calibration (relative to other candidates in this batch):\n"
+    "- Best setup with clear edge: 0.70+\n"
+    "- Decent opportunity with notable risks: 0.50-0.70\n"
+    "- Marginal or counter-trend: 0.30-0.50\n"
+    "Do NOT cluster all values around the same number — spread them to reflect real differences.\n\n"
+    "Keys: setup_type, bull_case(array), bear_case(array), "
     "trigger, invalidation, holding_window, execution_notes(array), confidence(0~1)."
 )
 
 JUDGE_SYSTEM = (
     "You are the cross-stock judge for a US equities swing-trading pipeline. "
-    "Return strict JSON with keys: final_top_n(array), ranked_candidates(array of objects with "
+    "Return strict JSON.\n\n"
+    "Ranking criteria:\n"
+    "- Prioritize risk-adjusted opportunity: strong setup + favorable sector + manageable downside\n"
+    "- Penalize broken technicals, weak sectors, and elevated macro risk\n"
+    "- For each candidate: provide selection_reason (why picked) OR rejection_reason (why not)\n"
+    "- portfolio_overlap_flags: use snake_case tags (e.g. defensive_sector, dividend_play, momentum)\n\n"
+    "Keys: final_top_n(array), ranked_candidates(array of objects with "
     "ticker, final_rank, selection_reason, rejection_reason, portfolio_overlap_flags), summary."
 )
 
@@ -97,6 +133,9 @@ def call_llm(cfg: dict, system_prompt: str, user_payload: dict, timeout: int = 2
     if not cfg.get("api_key"):
         return {"ok": False, "error": "no_api_key", "elapsed": 0}
 
+    if cfg.get("provider") == "gemini":
+        return _call_gemini(cfg, system_prompt, user_payload, timeout)
+
     body = json.dumps({
         "model": cfg["model"],
         "response_format": {"type": "json_object"},
@@ -127,6 +166,48 @@ def call_llm(cfg: dict, system_prompt: str, user_payload: dict, timeout: int = 2
         return {"ok": False, "error": str(e)[:200], "elapsed": elapsed}
 
 
+def _call_gemini(cfg: dict, system_prompt: str, user_payload: dict, timeout: int) -> dict:
+    """Call Gemini native API (generateContent)."""
+    base_url = "https://generativelanguage.googleapis.com/v1beta"
+    model = cfg["model"]
+    api_key = cfg["api_key"]
+    url = f"{base_url}/models/{model}:generateContent?key={api_key}"
+
+    user_text = json.dumps(user_payload, ensure_ascii=False)
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 4000,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        "Content-Type": "application/json",
+    })
+
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            result = json.loads(r.read())
+        elapsed = round(time.time() - t0, 1)
+        content = result["candidates"][0]["content"]["parts"][0]["text"]
+        usage_meta = result.get("usageMetadata", {})
+        usage = {
+            "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+            "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+            "total_tokens": usage_meta.get("totalTokenCount", 0),
+        }
+        parsed = _first_json(content)
+        return {"ok": True, "data": parsed, "elapsed": elapsed, "usage": usage}
+    except Exception as e:
+        elapsed = round(time.time() - t0, 1)
+        return {"ok": False, "error": str(e)[:200], "elapsed": elapsed}
+
+
 def _first_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
@@ -134,7 +215,14 @@ def _first_json(text: str) -> dict:
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines)
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        # If top-level is a list, take first dict element
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    return item
+            return {}
+        return parsed
     except json.JSONDecodeError:
         start = text.find("{")
         if start >= 0:
@@ -257,13 +345,24 @@ def main():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Load MiniMax API key from .env if not in environment
-    if not MODELS["minimax"]["api_key"]:
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
-        if os.path.exists(env_path):
-            for line in open(env_path):
-                if line.startswith("MINIMAX_API_KEY="):
-                    MODELS["minimax"]["api_key"] = line.split("=", 1)[1].strip()
+    # Load API keys from .env if not in environment
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        env_vars = {}
+        for line in open(env_path):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env_vars[k.strip()] = v.strip()
+        if not MODELS["minimax"]["api_key"] and env_vars.get("MINIMAX_API_KEY"):
+            MODELS["minimax"]["api_key"] = env_vars["MINIMAX_API_KEY"]
+        dashscope_key = env_vars.get("DASHSCOPE_API_KEY", "")
+        if dashscope_key:
+            for name in ("kimi-k2.5", "glm-5", "qwen3.5-plus"):
+                if not MODELS[name]["api_key"]:
+                    MODELS[name]["api_key"] = dashscope_key
+        if not MODELS["gemini-3.1-pro"]["api_key"] and env_vars.get("GEMINI_API_KEY"):
+            MODELS["gemini-3.1-pro"]["api_key"] = env_vars["GEMINI_API_KEY"]
 
     # Select models
     if args.models:
@@ -329,7 +428,7 @@ def main():
         print(f"Merged with {args.merge} ({len(all_results)} models total)")
 
     # Save results
-    output_path = os.path.join(OUTPUT_DIR, "comparison_v2.json")
+    output_path = os.path.join(OUTPUT_DIR, "comparison_v3.json")
     with open(output_path, "w") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
     print(f"Results saved to {output_path}")

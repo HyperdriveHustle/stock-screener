@@ -111,7 +111,19 @@ class MarketDataCollector:
         统一列名与索引格式
         """
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+            # yfinance MultiIndex: group_by="ticker" → (Ticker, Field), default → (Field, Ticker)
+            # Pick the level that contains OHLCV field names
+            ohlcv = {"Open", "High", "Low", "Close", "Volume"}
+            level0_vals = set(df.columns.get_level_values(0).unique())
+            level1_vals = set(df.columns.get_level_values(1).unique())
+            if ohlcv & level1_vals:
+                df.columns = df.columns.get_level_values(1)
+            else:
+                df.columns = df.columns.get_level_values(0)
+        # Ensure consistent column order
+        canonical_order = ["Open", "High", "Low", "Close", "Volume"]
+        if set(df.columns) == set(canonical_order):
+            df = df[canonical_order]
         else:
             columns = [str(col) for col in df.columns]
             required = {"Open", "High", "Low", "Close", "Volume"}
@@ -167,6 +179,11 @@ class MarketDataCollector:
             return fresh_df
         if fresh_df is None:
             return cached_df
+        # Deduplicate each input before concat to avoid InvalidIndexError
+        if cached_df.index.duplicated().any():
+            cached_df = cached_df[~cached_df.index.duplicated(keep="last")]
+        if fresh_df.index.duplicated().any():
+            fresh_df = fresh_df[~fresh_df.index.duplicated(keep="last")]
         merged = pd.concat([cached_df, fresh_df], axis=0)
         merged = merged[~merged.index.duplicated(keep="last")]
         merged = merged.sort_index()

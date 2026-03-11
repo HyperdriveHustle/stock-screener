@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hyperdrive.screener-arena.submit</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/python3</string>
+    <string>/ABSOLUTE/PATH/TO/life-os/20-wealth/trading-hub/stock-screener/scripts/screener_arena_automation.py</string>
+    <string>submit-latest</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/life-os/20-wealth/trading-hub/stock-screener</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>SYSTEM_API_KEY</key>
+    <string>YOUR_ARENA_SYSTEM_API_KEY</string>
+    <key>ARENA_DB_PATH</key>
+    <string>/ABSOLUTE/PATH/TO/arena.db</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>6</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/life-os/20-wealth/trading-hub/stock-screener/logs/screener-arena-submit.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/life-os/20-wealth/trading-hub/stock-screener/logs/screener-arena-submit.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -5,9 +5,8 @@ import logging
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
-import requests
-
 from runtime import config
+from runtime.llm_router import get_router
 from runtime.utils import first_json_object as _first_json_object
 
 logger = logging.getLogger(__name__)
@@ -161,48 +160,13 @@ def _prepare_final_payload(deep_analysis_by_ticker: dict[str, dict]) -> dict[str
 
 class StructuredLLMRunner:
     def __init__(self):
-        llm_cfg = config.PIPELINE_CONFIG["llm"]
-        self.enabled = bool(config.BUDGET_CONFIG.get("enable_live_llm"))
-        self.api_key = config.MINIMAX_API_KEY
-        self.endpoint = llm_cfg["endpoint"]
-        self.model = llm_cfg["model"]
-        self.timeout = int(config.BUDGET_CONFIG["llm_timeout_seconds"])
-
-    def _call_json(self, *, system_prompt: str, user_payload: dict) -> tuple[dict, dict]:
-        request_payload = {
-            "model": self.model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-        }
-
-        if not self.enabled or not self.api_key:
-            return request_payload, {}
-
-        try:
-            response = requests.post(
-                self.endpoint,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                },
-                json=request_payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            content = (
-                ((payload.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            )
-            parsed = _first_json_object(content)
-            if isinstance(parsed, dict):
-                return request_payload, parsed
-            logger.warning("LLM 返回无法解析为 JSON，返回 unavailable")
-        except Exception as exc:
-            logger.warning("LLM 调用失败，返回 unavailable: %s", exc)
-        return request_payload, {}
+        self._router = get_router()
+        # Check if any task has channels configured
+        self.enabled = bool(
+            self._router.get_channels("triage")
+            or self._router.get_channels("deep_analysis")
+            or self._router.get_channels("judge")
+        )
 
     def triage(self, market_context_compact: dict, compact_card: dict) -> tuple[dict, dict]:
         system_prompt = (
@@ -217,13 +181,17 @@ class StructuredLLMRunner:
             "compact_card": compact_card,
         }
         logger.info("LLM triage request: %s", compact_card.get("ticker"))
-        request_payload, response_payload = self._call_json(
+        request_payload, response_payload, channel = self._router.call_json(
+            "triage",
             system_prompt=system_prompt,
             user_payload=user_payload,
         )
         if response_payload:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["triage"])
             response_payload.setdefault("execution_mode", "live_llm")
+            if channel:
+                response_payload["_channel"] = channel.name
+                response_payload["_model"] = channel.model
             return request_payload, response_payload
         return request_payload, self._unavailable_triage()
 
@@ -243,13 +211,17 @@ class StructuredLLMRunner:
             "full_dossier": _prepare_deep_payload(full_dossier),
         }
         logger.info("LLM deep analysis request: %s", full_dossier.get("ticker"))
-        request_payload, response_payload = self._call_json(
+        request_payload, response_payload, channel = self._router.call_json(
+            "deep_analysis",
             system_prompt=system_prompt,
             user_payload=user_payload,
         )
         if response_payload:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["deep_analysis"])
             response_payload.setdefault("execution_mode", "live_llm")
+            if channel:
+                response_payload["_channel"] = channel.name
+                response_payload["_model"] = channel.model
             return request_payload, response_payload
         return request_payload, self._unavailable_deep_analysis()
 
@@ -271,13 +243,17 @@ class StructuredLLMRunner:
             "deep_analysis_by_ticker": _prepare_final_payload(deep_analysis_by_ticker),
         }
         logger.info("LLM final judge request: %d candidates", len(deep_analysis_by_ticker))
-        request_payload, response_payload = self._call_json(
+        request_payload, response_payload, channel = self._router.call_json(
+            "judge",
             system_prompt=system_prompt,
             user_payload=user_payload,
         )
         if response_payload:
             response_payload.setdefault("schema_version", config.PIPELINE_CONFIG["schema_versions"]["portfolio_judge"])
             response_payload.setdefault("execution_mode", "live_llm")
+            if channel:
+                response_payload["_channel"] = channel.name
+                response_payload["_model"] = channel.model
             return request_payload, response_payload
         return request_payload, self._unavailable_final_judge(selection_count)
 

@@ -1,6 +1,6 @@
 """
 新闻语义打标模块
-- Provider 抽象（首版接 MiniMax）
+- 通过 LLMRouter 支持多通道负载均衡 + failover
 - 单条新闻情绪/影响打标
 - 缓存与 provenance 追踪
 """
@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any
 
-import requests
-
 from runtime import config
+from runtime.llm_router import LLMChannel, get_router
 from runtime.utils import first_json_object as _first_json_object
 from runtime.utils import safe_float as _safe_float
 from providers.cache_store import SQLiteCache
@@ -196,98 +196,58 @@ def _build_rollup(items: list[dict], relevance_threshold: float = _RELEVANCE_THR
     }
 
 
-class MiniMaxSemanticProvider:
-    """MiniMax 语义打标 provider"""
+_SEMANTIC_SYSTEM_PROMPT = (
+    "You are a disciplined US equities news analyst. "
+    "Return strict JSON only, no markdown. "
+    "Schema: sentiment(bullish|neutral|bearish), impact(low|medium|high), "
+    "confidence(0~1), relevance(0~1, how directly this article relates to the ticker - "
+    "1.0=directly about the company, 0.7=about direct competitors/suppliers, "
+    "0.4=about the sector broadly, 0.1=mentions ticker but unrelated, 0.0=completely unrelated), "
+    "evidence(array of <=3 short strings), reasoning(short string)."
+)
 
-    def __init__(self, api_key: str, model: str, endpoint: str, timeout_seconds: int):
-        self.api_key = api_key
-        self.model = model
-        self.endpoint = endpoint
-        self.timeout_seconds = timeout_seconds
 
-    def tag_article(self, ticker: str, article: dict, prompt_version: str) -> dict:
-        system_prompt = (
-            "You are a disciplined US equities news analyst. "
-            "Return strict JSON only, no markdown. "
-            "Schema: sentiment(bullish|neutral|bearish), impact(low|medium|high), "
-            "confidence(0~1), relevance(0~1, how directly this article relates to the ticker - "
-            "1.0=directly about the company, 0.7=about direct competitors/suppliers, "
-            "0.4=about the sector broadly, 0.1=mentions ticker but unrelated, 0.0=completely unrelated), "
-            "evidence(array of <=3 short strings), reasoning(short string)."
-        )
+def _tag_article_via_channel(channel: LLMChannel, ticker: str, article: dict, prompt_version: str) -> dict:
+    """Tag a single article using a specific LLM channel."""
+    from runtime.llm_router import get_router
+    router = get_router()
 
-        user_payload = {
-            "ticker": ticker,
-            "prompt_version": prompt_version,
-            "headline": article.get("headline", ""),
-            "summary": article.get("summary", ""),
-            "source": article.get("source", ""),
-            "datetime": article.get("datetime", 0),
-            "url": article.get("url", ""),
-        }
+    user_payload = {
+        "ticker": ticker,
+        "prompt_version": prompt_version,
+        "headline": article.get("headline", ""),
+        "summary": article.get("summary", ""),
+        "source": article.get("source", ""),
+        "datetime": article.get("datetime", 0),
+        "url": article.get("url", ""),
+    }
 
-        payload = {
-            "model": self.model,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        "Tag this single news item for short-term swing impact.\n"
-                        f"Input JSON:\n{json.dumps(user_payload, ensure_ascii=False)}"
-                    ),
-                },
-            ],
-        }
+    parsed = router.call_raw(
+        channel,
+        system_prompt=_SEMANTIC_SYSTEM_PROMPT,
+        user_payload={"instruction": "Tag this single news item for short-term swing impact.", **user_payload},
+    )
+    if not isinstance(parsed, dict):
+        raise ValueError("semantic channel returned non-json payload")
 
-        resp = requests.post(
-            self.endpoint,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            json=payload,
-            timeout=self.timeout_seconds,
-        )
-        resp.raise_for_status()
-
-        body = resp.json()
-        choice = (body.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        content = message.get("content")
-        raw_response = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-        think_content = (
-            message.get("reasoning_content")
-            or message.get("think_content")
-            or choice.get("reasoning_content")
-            or ""
-        )
-
-        parsed = _first_json_object(raw_response)
-        if not isinstance(parsed, dict):
-            raise ValueError("semantic provider returned non-json payload")
-
-        result = _normalize_semantic_payload(parsed)
-        result.update(
-            {
-                "provider": "minimax",
-                "model": self.model,
-                "raw_response": raw_response,
-                "think_content": str(think_content or ""),
-            }
-        )
-        return result
+    think_content = parsed.pop("_think_content", "")
+    result = _normalize_semantic_payload(parsed)
+    result.update({
+        "provider": channel.name,
+        "model": channel.model,
+        "raw_response": json.dumps(parsed, ensure_ascii=False),
+        "think_content": str(think_content or ""),
+    })
+    return result
 
 
 class SemanticNewsTagger:
-    """新闻逐条语义打标（带缓存）"""
+    """新闻逐条语义打标（带缓存 + 多通道负载均衡）"""
 
     def __init__(self, cache: SQLiteCache | None = None):
         self.cache = cache or SQLiteCache(config.CACHE["db_file"])
 
         self.enabled = bool(config.NEWS.get("enable_semantic_tagging", True))
-        self.provider_name = str(config.NEWS.get("semantic_provider", "minimax")).strip().lower()
         self.prompt_version = str(config.NEWS.get("semantic_prompt_version", "news_semantic_v1")).strip()
         self.max_articles_per_stock = int(
             config.NEWS.get(
@@ -308,21 +268,16 @@ class SemanticNewsTagger:
         }
         self.semantic_meta: dict[str, dict] = {}
 
-        self.provider = None
-        if self.provider_name == "minimax" and config.MINIMAX_API_KEY:
-            self.provider = MiniMaxSemanticProvider(
-                api_key=config.MINIMAX_API_KEY,
-                model=str(config.NEWS.get("semantic_model", "MiniMax-M2.5")),
-                endpoint=str(config.NEWS.get("semantic_endpoint", "https://api.minimaxi.com/v1/chat/completions")),
-                timeout_seconds=int(config.NEWS.get("semantic_timeout_seconds", 20)),
-            )
+        # Load channels from router
+        self._router = get_router()
+        self._channels = self._router.get_channels("semantic")
 
     @staticmethod
     def _article_fingerprint(article: dict) -> str:
         return SQLiteCache.news_fingerprint(article or {})
 
     def _cache_key(self, ticker: str, fingerprint: str) -> str:
-        return f"news_semantic:{self.provider_name}:{self.prompt_version}:{ticker}:{fingerprint}"
+        return f"news_semantic:router:{self.prompt_version}:{ticker}:{fingerprint}"
 
     def _build_meta(
         self,
@@ -336,7 +291,7 @@ class SemanticNewsTagger:
         now = datetime.utcnow()
         expires_at = now + timedelta(seconds=max(1, self.cache_ttl_seconds))
         return {
-            "source": self.provider_name or "news_semantic",
+            "source": "llm_router",
             "symbol": ticker,
             "data_type": "news_semantic",
             "as_of": now.isoformat(),
@@ -370,6 +325,11 @@ class SemanticNewsTagger:
             results[ticker] = self.tag_articles(ticker=ticker, articles=articles)
         return results
 
+    def _pick_channel_for_index(self, idx: int) -> LLMChannel | None:
+        if not self._channels:
+            return None
+        return self._channels[idx % len(self._channels)]
+
     def tag_articles(self, ticker: str, articles: list[dict]) -> dict:
         selected = list(articles or [])
         if self.max_articles_per_stock > 0:
@@ -395,6 +355,8 @@ class SemanticNewsTagger:
             "cache_fallback": 0,
         }
 
+        # Phase 1: check cache, collect misses for concurrent tagging
+        to_tag: list[tuple[str, str, dict]] = []  # (fingerprint, cache_key, article)
         for article in selected:
             fingerprint = self._article_fingerprint(article)
             cache_key = self._cache_key(ticker, fingerprint)
@@ -417,58 +379,54 @@ class SemanticNewsTagger:
 
             mode_counts["cache_miss"] += 1
             self.cache_stats["semantic_miss"] += 1
+            to_tag.append((fingerprint, cache_key, article))
 
-            semantic = None
-            if self.provider is not None:
+        # Phase 2: concurrent API calls with round-robin channel assignment
+        max_workers = min(len(to_tag), 5) if to_tag else 0
+        if max_workers > 0 and self._channels:
+            def _tag_one(idx: int, item: tuple[str, str, dict]) -> tuple[str, str, dict | None]:
+                fp, ck, art = item
+                channel = self._pick_channel_for_index(idx)
+                if channel is None:
+                    return fp, ck, None
                 try:
-                    semantic = self.provider.tag_article(
-                        ticker=ticker,
-                        article=article,
-                        prompt_version=self.prompt_version,
-                    )
+                    return fp, ck, _tag_article_via_channel(channel, ticker, art, self.prompt_version)
                 except Exception as e:
-                    self.cache_stats["semantic_error"] += 1
-                    logger.debug(f"语义打标失败 {ticker}: {e}")
+                    logger.debug("语义打标失败 %s via %s: %s", ticker, channel.name, e)
+                    # Failover: try other channels
+                    for fallback_idx in range(len(self._channels)):
+                        if fallback_idx == (idx % len(self._channels)):
+                            continue
+                        try:
+                            return fp, ck, _tag_article_via_channel(
+                                self._channels[fallback_idx], ticker, art, self.prompt_version,
+                            )
+                        except Exception:
+                            continue
+                    return fp, ck, None
 
-            retrieval_mode = "network_refresh"
-            if semantic is None:
-                if not self.enable_fallback:
-                    continue
-                semantic = _keyword_fallback(article, reason="provider_unavailable_or_failed")
-                retrieval_mode = "cache_fallback"
-                mode_counts["cache_fallback"] += 1
-                self.cache_stats["semantic_fallback"] += 1
-            else:
-                mode_counts["network_refresh"] += 1
-                self.cache_stats["semantic_network_refresh"] += 1
-
-            semantic["prompt_version"] = self.prompt_version
-            semantic["article_fingerprint"] = fingerprint
-            semantic["retrieval_mode"] = retrieval_mode
-            semantic["tagged_at"] = datetime.utcnow().isoformat()
-            semantic["heuristic_only"] = retrieval_mode == "cache_fallback"
-
-            if retrieval_mode == "cache_fallback":
-                heuristic_by_fingerprint[fingerprint] = semantic
-                continue
-
-            self.cache.set(
-                key=cache_key,
-                payload=semantic,
-                ttl_seconds=self.cache_ttl_seconds,
-                source=str(semantic.get("provider") or self.provider_name),
-                symbol=ticker,
-                data_type="news_semantic",
-                as_of=semantic.get("tagged_at") or datetime.utcnow().isoformat(),
-            )
-            by_fingerprint[fingerprint] = semantic
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_tag_one, i, item): item for i, item in enumerate(to_tag)}
+                for future in as_completed(futures):
+                    fingerprint, cache_key, semantic = future.result()
+                    self._process_tag_result(
+                        fingerprint, cache_key, futures[future][2], semantic, ticker,
+                        by_fingerprint, heuristic_by_fingerprint, mode_counts,
+                    )
+        elif to_tag:
+            # No channels available, use fallback for all misses
+            for fingerprint, cache_key, article in to_tag:
+                self._process_tag_result(
+                    fingerprint, cache_key, article, None, ticker,
+                    by_fingerprint, heuristic_by_fingerprint, mode_counts,
+                )
 
         rollup = _build_rollup(list(by_fingerprint.values()))
         heuristic_rollup = _build_rollup(list(heuristic_by_fingerprint.values()))
         retrieval_mode = self._pick_retrieval_mode(mode_counts, article_count=len(selected))
         reason = ""
-        if self.provider is None:
-            reason = "missing_provider_api_key"
+        if not self._channels:
+            reason = "no_channels_configured"
         if not by_fingerprint and heuristic_by_fingerprint:
             retrieval_mode = "heuristic_only"
             reason = "live_provider_unavailable"
@@ -486,6 +444,51 @@ class SemanticNewsTagger:
             "heuristic_by_fingerprint": heuristic_by_fingerprint,
             "heuristic_rollup": heuristic_rollup,
         }
+
+    def _process_tag_result(
+        self,
+        fingerprint: str,
+        cache_key: str,
+        article: dict,
+        semantic: dict | None,
+        ticker: str,
+        by_fingerprint: dict[str, dict],
+        heuristic_by_fingerprint: dict[str, dict],
+        mode_counts: dict[str, int],
+    ) -> None:
+        retrieval_mode = "network_refresh"
+        if semantic is None:
+            self.cache_stats["semantic_error"] += 1
+            if not self.enable_fallback:
+                return
+            semantic = _keyword_fallback(article, reason="provider_unavailable_or_failed")
+            retrieval_mode = "cache_fallback"
+            mode_counts["cache_fallback"] += 1
+            self.cache_stats["semantic_fallback"] += 1
+        else:
+            mode_counts["network_refresh"] += 1
+            self.cache_stats["semantic_network_refresh"] += 1
+
+        semantic["prompt_version"] = self.prompt_version
+        semantic["article_fingerprint"] = fingerprint
+        semantic["retrieval_mode"] = retrieval_mode
+        semantic["tagged_at"] = datetime.utcnow().isoformat()
+        semantic["heuristic_only"] = retrieval_mode == "cache_fallback"
+
+        if retrieval_mode == "cache_fallback":
+            heuristic_by_fingerprint[fingerprint] = semantic
+            return
+
+        self.cache.set(
+            key=cache_key,
+            payload=semantic,
+            ttl_seconds=self.cache_ttl_seconds,
+            source=str(semantic.get("provider") or "llm_router"),
+            symbol=ticker,
+            data_type="news_semantic",
+            as_of=semantic.get("tagged_at") or datetime.utcnow().isoformat(),
+        )
+        by_fingerprint[fingerprint] = semantic
 
     def get_semantic_meta(self, ticker: str) -> dict:
         return dict(self.semantic_meta.get(ticker, {}))

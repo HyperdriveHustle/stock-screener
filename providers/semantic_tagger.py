@@ -409,6 +409,7 @@ class SemanticNewsTagger:
                 futures = {pool.submit(_tag_one, i, item): item for i, item in enumerate(to_tag)}
                 for future in as_completed(futures):
                     fingerprint, cache_key, semantic = future.result()
+                    print(f"Finished tagging {fingerprint} for {ticker}")
                     self._process_tag_result(
                         fingerprint, cache_key, futures[future][2], semantic, ticker,
                         by_fingerprint, heuristic_by_fingerprint, mode_counts,

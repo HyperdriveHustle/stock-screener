@@ -1,0 +1,39 @@
+{
+  "setup_type": "mean_reversion_support",
+  "bull_case": [
+    "Technical support at $267.72 being tested with stock down 3.65% intraday - if holds, creates defined risk entry point with bounce potential toward $273-280 resistance zone",
+    "Cramer endorsement creates retail attention catalyst: 'Western Digital, Seagate, SanDisk, and Micron could all be bought on a big move down because of oil' - providing narrative support",
+    "Analyst consensus BUY (1.62 mean) from 23 analysts with $321 target (19.4% upside) indicates institutional conviction despite sector weakness",
+    "Solid fundamentals: 35.6% profit margin, 41.1% ROE, $3.9B free cash flow support valuation floor at current levels",
+    "Storage sector benefiting from structural AI/cloud/IoT demand tailwinds per Zacks industry outlook - thesis intact beyond current volatility",
+    "High liquidity ($2.6B daily dollar volume, 8.6M shares avg) enables clean swing execution with minimal slippage on entry and exit",
+    "Trading above 50-day MA ($248.71) confirms intermediate-term uptrend remains intact - 20-day MA violation may be temporary"
+  ],
+  "bear_case": [
+    "Semiconductor sector experiencing severe liquidation (SMH -3.38%, SOXX -3.76% same session) - sector headwind overrides individual name strength",
+    "VIX at 26.57 (+50.5% over 20d, +9.7% today) indicates risk-off regime historically unfavorable for swing longs in high-beta tech names",
+    "Below-average volume ratio (0.6x) on 3.65% decline suggests weak buyer conviction - no accumulation pattern emerging at support",
+    "MACD histogram deeply negative (-3.60) with MACD below signal line indicates accelerating bearish momentum, not bottoming",
+    "Iran conflict escalation risk could drive oil toward $120 per Reuters reports, potentially triggering broader risk-asset selloff and deeper tech correction",
+    "FOMC Rate Decision March 18 (6 days out) coincides with WDC dividend date - double event risk creates binary outcome uncertainty",
+    "Beta of 1.85 amplifies market downside: if SPY continues lower, WDC likely underperforms significantly"
+  ],
+  "trigger": "Price holding firmly above $267 support with volume pickup above 1.0x average and positive intraday RSI divergence, OR decisive break above $273 (20-day MA) with volume confirmation signaling momentum shift",
+  "invalidation": "Close below $264 (breaking support zone and 3/9 swing low of $262) invalidates support thesis and signals continuation toward $255-250 zone; VIX spike above 30 indicates systemic risk escalation requiring exit",
+  "holding_window": "5-10 trading days",
+  "execution_notes": [
+    "Wait for intraday stabilization: avoid catching falling knife - look for price holding above $267 for 2+ hours with declining selling volume",
+    "Scale entry: start with 50% position given elevated market volatility; add on confirmed bounce above $270",
+    "Stop placement: $264.25 (below support with ATR buffer) - 1.7% risk from $268.81 entry",
+    "Profit targets: T1 at $273 (20-day MA, ~1.5R), T2 at $280 (resistance, ~3R), T3 at $285",
+    "Event calendar risk: avoid new positions after March 17 close (FOMC March 18) - existing positions should be reduced or hedged",
+    "Sector correlation check: if SMH/SOXX continue lower without stabilization, skip entry regardless of WDC individual action",
+    "Volume validation: bounce without volume above 8M shares indicates weak participation - reduce targets or exit early",
+    "Options alignment: put/call OI ratio 0.87 neutral-to-bullish; unusual put activity at lower strikes suggests hedging - monitor for sentiment shift"
+  ],
+  "confidence": 0.55,
+  "schema_version": "deep_analysis_v1",
+  "execution_mode": "live_llm",
+  "_channel": "aliyun-glm5",
+  "_model": "glm-5"
+}

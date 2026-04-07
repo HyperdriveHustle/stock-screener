@@ -1,0 +1,24 @@
+2026-03-12 23:27:08,746 [INFO] __main__: Ticker override: ['GOOGL', 'AAPL', 'TSLA', 'COIN', 'MSFT', 'WDC']
+2026-03-12 23:27:08,747 [INFO] workflow.pipeline: Session 20260312_intraday_112708 | intraday
+2026-03-12 23:27:17,864 [INFO] providers.collector: 下载行情数据 批次 1/1 (6 只, start=2026-03-04)
+2026-03-12 23:27:27,875 [ERROR] yfinance: 
+2 Failed downloads:
+2026-03-12 23:27:27,877 [ERROR] yfinance: ['WDC', 'AAPL']: TypeError("'NoneType' object is not subscriptable")
+2026-03-12 23:27:27,909 [INFO] providers.collector: 行情数据完成: 6/6 | 缓存命中=6 缓存未命中=0 网络更新=6
+2026-03-12 23:27:27,911 [INFO] providers.collector: 获取股票实时信息 (5 只需网络请求, 8 线程)...
+2026-03-12 23:27:35,619 [ERROR] yfinance: HTTP Error 401: {"finance":{"result":null,"error":{"code":"Unauthorized","description":"Invalid Crumb"}}}
+2026-03-12 23:27:40,433 [ERROR] yfinance: HTTP Error 401: {"finance":{"result":null,"error":{"code":"Unauthorized","description":"Invalid Crumb"}}}
+2026-03-12 23:27:49,782 [INFO] providers.collector: 实时信息完成: 3/6 | 缓存命中=1 网络请求=5
+2026-03-12 23:27:49,820 [INFO] providers.collector: 采集新闻数据 (6 只)...
+2026-03-12 23:27:58,292 [INFO] providers.collector: 新闻采集完成: 6 只有相关新闻 | 缓存命中=5 网络请求=1
+Finished tagging e111abb2a1c1840db5ddafc9b2e9b4a033a674cc767c756ff04393d5dda4fbb0 for WDC
+Finished tagging 399139c6e9ab373cc3f34990afea434b8673f1f8260de1fa6a46e5ae5c985883 for WDC
+Finished tagging 347617f00d8293b808d9b31e5baaa26579acbda6bd975aa233e5cab6cea8ebc3 for WDC
+Finished tagging 70f904191859f8962c05c673e1b401679dba9421b9cdee7b698655881af1b298 for WDC
+Finished tagging dd2b68d9a6755b1168ab758039656ff62f6dc96a50ff3bcb46cdbfd7173984ed for WDC
+Finished tagging afe3eeec3996e669f4ac16b1b21556818284624a09c1dec9563574f3a6b6a2d9 for WDC
+2026-03-12 23:30:06,090 [INFO] workflow.pipeline: Using static macro calendar fallback: 2 events
+2026-03-12 23:30:30,353 [INFO] workflow.llm_funnel: LLM triage request: COIN
+2026-03-12 23:31:12,804 [INFO] workflow.llm_funnel: LLM triage request: WDC
+2026-03-12 23:31:57,899 [INFO] workflow.llm_funnel: LLM triage request: GOOGL
+2026-03-12 23:32:46,824 [INFO] workflow.llm_funnel: LLM triage request: MSFT

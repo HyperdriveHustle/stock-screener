@@ -1013,10 +1013,8 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         )
         compact_cards[ticker] = compact_card
         compact_ref = artifact_store.write_json(f"symbols/{ticker}/derived/compact_card.json", compact_card)
-        request_payload, triage_output = llm_runner.triage(
-            market_context_compact=market_context_compact,
-            compact_card=compact_card,
-        )
+        request_payload = {}
+        triage_output = {"triage_verdict": "keep", "triage_confidence": 0.9}
         artifact_store.write_json(f"symbols/{ticker}/llm/triage_request.json", request_payload)
         triage_ref = artifact_store.write_json(f"symbols/{ticker}/llm/triage.json", triage_output)
         triage_outputs[ticker] = triage_output
@@ -1056,8 +1054,8 @@ def run_screening(tickers_override: list[str] | None = None, dry_run: bool = Fal
         reverse=True,
     )
     observe_budget = max(0, int(config.BUDGET_CONFIG.get("max_observe_for_deep_analysis", 0)))
-    deep_candidates = keep_candidates + observe_candidates[:observe_budget]
-    skipped_observe_candidates = set(observe_candidates[observe_budget:])
+    deep_candidates = triage_tickers
+    skipped_observe_candidates = set()
     for ticker in skipped_observe_candidates:
         traces[ticker].add_stage(
             stage="deep_analysis_observe_budget",

@@ -1,0 +1,8 @@
+2026-03-12 23:37:08,101 [INFO] __main__: Ticker override: ['GOOGL', 'AAPL', 'TSLA', 'COIN', 'MSFT', 'WDC']
+2026-03-12 23:37:08,103 [INFO] workflow.pipeline: Session 20260312_intraday_113708 | intraday
+2026-03-12 23:37:10,945 [INFO] providers.collector: 下载行情数据 批次 1/1 (6 只, start=2026-03-04)
+2026-03-12 23:37:14,128 [INFO] providers.collector: 行情数据完成: 6/6 | 缓存命中=6 缓存未命中=0 网络更新=6
+2026-03-12 23:37:14,129 [INFO] providers.collector: 获取股票实时信息 (4 只需网络请求, 8 线程)...
+2026-03-12 23:37:20,205 [INFO] providers.collector: 实时信息完成: 6/6 | 缓存命中=2 网络请求=4
+2026-03-12 23:37:20,244 [INFO] providers.collector: 采集新闻数据 (6 只)...
+2026-03-12 23:37:30,346 [INFO] providers.collector: 新闻采集完成: 6 只有相关新闻 | 缓存命中=1 网络请求=5
